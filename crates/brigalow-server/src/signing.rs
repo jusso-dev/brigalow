@@ -39,6 +39,8 @@ pub struct PolicyInput {
     pub claims: BTreeMap<String, String>,
     pub algorithms: Vec<Algorithm>,
     pub timestamp: Timestamp,
+    #[serde(default)]
+    pub approval: Option<brigalow_core::approvals::Rule>,
 }
 pub async fn create_policy(
     State(state): State<AppState>,
@@ -66,6 +68,7 @@ pub async fn create_policy(
         claims: input.claims,
         algorithms: input.algorithms,
         timestamp: input.timestamp,
+        approval: input.approval,
     };
     let backend = state
         .keys
@@ -158,7 +161,7 @@ pub async fn submit(
         .keys
         .as_ref()
         .ok_or(WebError(StatusCode::SERVICE_UNAVAILABLE))?;
-    let mut request = tenant
+    let request = tenant
         .prepare_sign(
             &p,
             project,
@@ -178,7 +181,24 @@ pub async fn submit(
             },
         ));
     }
-    let result = produce(&state, &request).await;
+    if request.state == RequestState::AwaitingApproval {
+        state.notifications.requested(&tenant, &request).await?;
+        return Ok((StatusCode::ACCEPTED, Json(request)));
+    }
+    complete(&state, request).await
+}
+pub async fn complete(
+    state: &AppState,
+    mut request: SignRequest,
+) -> Result<(StatusCode, Json<SignRequest>)> {
+    let tenant = state.store.tenant(
+        request
+            .principal
+            .as_ref()
+            .ok_or(WebError(StatusCode::INTERNAL_SERVER_ERROR))?
+            .org_id,
+    );
+    let result = produce(state, &request).await;
     match result {
         Ok((output, timestamp)) => {
             request.output = Some(output);

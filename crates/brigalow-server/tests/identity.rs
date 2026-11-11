@@ -173,6 +173,7 @@ async fn fixture() -> Fixture {
     )
     .unwrap();
     let router = application(AppState {
+        notifications: Default::default(),
         tsa: Some(tsa.clone()),
         keys: Some(keys.clone()),
         store: store.clone(),
@@ -1559,6 +1560,7 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
     )
     .unwrap();
     f.router = application(AppState {
+        notifications: Default::default(),
         store: f.store.clone(),
         identity: Some(f.identity.clone()),
         mode: Mode::Lab,
@@ -1598,6 +1600,7 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
         .await
         .unwrap();
     f.router = application(AppState {
+        notifications: Default::default(),
         store: f.store.clone(),
         identity: Some(f.identity.clone()),
         mode: Mode::Lab,
@@ -1670,6 +1673,525 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
     assert!(audit
         .iter()
         .any(|e| e.details["reason"] == "unknown_policy_or_project"));
+    f.store.close().await;
+    f.admin.close().await;
+}
+
+async fn role_session(f: &Fixture, actor: &str, roles: Vec<Role>) -> (String, String) {
+    let secret = auth::random_secret();
+    let csrf = auth::random_secret();
+    let org = f.orgs[0];
+    let p = brigalow_core::rbac::Principal {
+        org_id: org,
+        actor: actor.into(),
+        roles,
+        scope: None,
+        human: true,
+        claims: Default::default(),
+    };
+    f.store
+        .tenant(org)
+        .issue_credential(
+            &auth::hash(&secret),
+            &p,
+            Some(&csrf),
+            auth::now() + 600,
+            "fixture",
+        )
+        .await
+        .unwrap();
+    (format!("__Host-brigalow={org}.{secret}"), csrf)
+}
+async fn json_as(
+    f: &Fixture,
+    path: &str,
+    session: &(String, String),
+    body: Value,
+) -> (StatusCode, HeaderMap, String) {
+    request(
+        f,
+        "POST",
+        path,
+        Some(&session.0),
+        None,
+        Some(&session.1),
+        body,
+    )
+    .await
+}
+#[tokio::test]
+async fn at_apr_01_03_and_rel_01_02_individual_decisions_and_atomic_caps() {
+    use brigalow_core::{
+        keys::KeyRecord,
+        policy::{Policy, RequestState, SignRequest},
+        windows::ReleaseWindow,
+    };
+    use std::io::BufRead;
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = fixture().await;
+    let notification_dir = tempfile::tempdir().unwrap();
+    let secret_file = notification_dir.path().join("secret");
+    std::fs::write(&secret_file, auth::random_secret()).unwrap();
+    std::fs::set_permissions(&secret_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let status_file = notification_dir.path().join("status");
+    std::fs::write(&status_file, "204").unwrap();
+    let mut receiver = ChildGuard(
+        std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deploy/dev/test_notifications.py"
+            ))
+            .arg(std::env::var("BRIGALOW_TEST_TLS_CERT_FILE").unwrap())
+            .arg(std::env::var("BRIGALOW_TEST_TLS_KEY_FILE").unwrap())
+            .arg(notification_dir.path())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut port = String::new();
+    std::io::BufReader::new(receiver.0.stdout.take().unwrap())
+        .read_line(&mut port)
+        .unwrap();
+    let config = brigalow_server::notifications::Config {
+        org: f.orgs[0],
+        url: format!("https://127.0.0.1:{}/notify", port.trim()),
+        secret_file,
+        tls_ca_file: Some(std::env::var("BRIGALOW_TEST_DB_CA_FILE").unwrap().into()),
+    };
+    let notifications = brigalow_server::notifications::Notifications::new(&[config]).unwrap();
+    f.router = application(AppState {
+        notifications: notifications.clone(),
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    let org = f.orgs[0];
+    let project = f.objects[0][0];
+    let requester = role_session(&f, "charlie", vec![Role::Submitter, Role::Approver]).await;
+    let alice = role_session(&f, "alice", vec![Role::Approver]).await;
+    let bob = role_session(&f, "bob", vec![Role::Approver]).await;
+    let custodian = role_session(&f, "bob", vec![Role::Approver, Role::KeyCustodian]).await;
+    let admin = login(&f, org).await;
+    let keypath = format!("/v1/orgs/{org}/projects/{project}/keys");
+    let result = json_as(
+        &f,
+        &keypath,
+        &custodian,
+        json!({"algorithm":"p256","purpose":"test","offline":false}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let key: KeyRecord = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/keys/{}/activate", key.key.id),
+            &custodian,
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    let policypath = format!("/v1/orgs/{org}/projects/{project}/policies");
+    let policy_input = json!({"name":"approvals","key":key.key.id,"purpose":"test","claims":{},"algorithms":["p256"],"timestamp":"disabled","approval":{"approvers":["alice","bob","charlie"],"required":2,"ttl_seconds":120}});
+    let result = json_as(&f, &policypath, &admin, policy_input.clone()).await;
+    assert_eq!(result.0, 201);
+    let policy: Policy = serde_json::from_str(&result.2).unwrap();
+    let submit = format!("/v1/orgs/{org}/projects/{project}/sign-requests");
+    let input = |policy| json!({"request_id":Uuid::new_v4(),"policy":policy,"digest_alg":"sha256","digest":vec![7;32],"artifact_name":"<script>fixture</script>","format":"raw"});
+    let result = json_as(&f, &submit, &requester, input(policy.id)).await;
+    assert_eq!(result.0, 202);
+    let pending: SignRequest = serde_json::from_str(&result.2).unwrap();
+    let events_file = notification_dir.path().join("events.jsonl");
+    let delivered = std::fs::read_to_string(&events_file).unwrap();
+    let event: Value = serde_json::from_str(delivered.trim()).unwrap();
+    assert_eq!(event["org"], json!(org));
+    assert_eq!(event["request"], json!(pending.submission.request_id));
+    assert_eq!(event["event"], "approval.requested");
+    assert_eq!(event.as_object().unwrap().len(), 7);
+    // A foreign tenant has no endpoint; never disclose its requests to this receiver.
+    let mut foreign = pending.clone();
+    foreign.principal.as_mut().unwrap().org_id = f.orgs[1];
+    notifications
+        .requested(&f.store.tenant(f.orgs[1]), &foreign)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&events_file).unwrap(), delivered);
+    // Redirect must not be followed. Delivery failure leaves signing authority unchanged.
+    std::fs::write(&status_file, "302").unwrap();
+    let id = pending.submission.request_id;
+    assert!(pending.output.is_none());
+    assert_eq!(pending.state, RequestState::AwaitingApproval);
+    let decision_path = format!("/v1/orgs/{org}/requests/{id}/decisions");
+    for session in [&requester, &custodian] {
+        assert_eq!(
+            json_as(&f, &decision_path, session, json!({"decision":"approve"}))
+                .await
+                .0,
+            403
+        );
+        let page = request(
+            &f,
+            "GET",
+            &format!("/orgs/{org}/requests/{id}"),
+            Some(&session.0),
+            None,
+            None,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(page.0, 200);
+        assert!(!page.2.contains("Approve this request"));
+        assert!(!page.2.contains("<script>fixture"));
+    }
+    let page = request(
+        &f,
+        "GET",
+        &format!("/orgs/{org}/requests/{id}"),
+        Some(&alice.0),
+        None,
+        None,
+        Value::Null,
+    )
+    .await;
+    assert!(page.2.contains("Approve this request"));
+    assert!(page.2.contains("Verified identity claims"));
+    assert!(page.2.contains("SHA-256 digest"));
+    assert!(page.2.contains("Lab"));
+    assert!(!page.2.contains("<script>fixture"));
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &decision_path,
+            Some(&alice.0),
+            None,
+            None,
+            json!({"decision":"approve"})
+        )
+        .await
+        .0,
+        403
+    );
+    let result = json_as(&f, &decision_path, &alice, json!({"decision":"approve"})).await;
+    assert_eq!(result.0, 200);
+    let one: SignRequest = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(one.state, RequestState::AwaitingApproval);
+    assert!(one.output.is_none());
+    assert_eq!(
+        json_as(&f, &decision_path, &alice, json!({"decision":"approve"}))
+            .await
+            .0,
+        409
+    );
+    let result = json_as(&f, &decision_path, &bob, json!({"decision":"approve"})).await;
+    assert_eq!(result.0, 201);
+    let signed: SignRequest = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(signed.state, RequestState::Signed);
+    assert!(signed.output.is_some());
+    let result = json_as(&f, &submit, &requester, input(policy.id)).await;
+    let second: SignRequest = serde_json::from_str(&result.2).unwrap();
+    let deny_path = format!(
+        "/v1/orgs/{org}/requests/{}/decisions",
+        second.submission.request_id
+    );
+    assert_eq!(
+        json_as(&f, &deny_path, &alice, json!({"decision":"approve"}))
+            .await
+            .0,
+        200
+    );
+    let result = json_as(&f, &deny_path, &bob, json!({"decision":"deny"})).await;
+    assert_eq!(result.0, 200);
+    let denied: SignRequest = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(denied.state, RequestState::Rejected);
+    assert!(denied.output.is_none());
+    assert_eq!(
+        std::fs::read_to_string(&events_file)
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    std::fs::write(&status_file, "204").unwrap();
+    let result = json_as(&f, &submit, &requester, input(policy.id)).await;
+    let form_request: SignRequest = serde_json::from_str(&result.2).unwrap();
+    for session in [&alice, &bob] {
+        let form = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/orgs/{org}/requests/{}/decisions",
+                form_request.submission.request_id
+            ))
+            .header("cookie", &session.0)
+            .header("origin", "https://brigalow.test")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!("csrf={}&decision=approve", session.1)))
+            .unwrap();
+        assert_eq!(f.router.clone().oneshot(form).await.unwrap().status(), 303);
+    }
+    assert_eq!(
+        f.store
+            .tenant(org)
+            .sign_request(form_request.submission.request_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Signed
+    );
+    // HTML mutation uses the same decision path and CSRF rules, without a bulk action.
+    let missing = Request::builder()
+        .method("POST")
+        .uri(format!("/orgs/{org}/requests/{id}/decisions"))
+        .header("cookie", &alice.0)
+        .header("origin", "https://brigalow.test")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("csrf=wrong&decision=approve"))
+        .unwrap();
+    assert_eq!(
+        f.router.clone().oneshot(missing).await.unwrap().status(),
+        403
+    );
+    let mut expiry_policy = policy_input;
+    expiry_policy["name"] = json!("expiry");
+    expiry_policy["approval"]["ttl_seconds"] = json!(2);
+    let result = json_as(&f, &policypath, &admin, expiry_policy).await;
+    let expires: Policy = serde_json::from_str(&result.2).unwrap();
+    let result = json_as(&f, &submit, &requester, input(expires.id)).await;
+    let expires: SignRequest = serde_json::from_str(&result.2).unwrap();
+    let expiry_id = expires.submission.request_id;
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    let result = request(
+        &f,
+        "GET",
+        &format!("/v1/orgs/{org}/requests/{expiry_id}"),
+        Some(&alice.0),
+        None,
+        None,
+        Value::Null,
+    )
+    .await;
+    let expired: SignRequest = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(expired.state, RequestState::Expired);
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/requests/{expiry_id}/decisions"),
+            &alice,
+            json!({"decision":"approve"})
+        )
+        .await
+        .0,
+        409
+    );
+    let result = json_as(
+        &f,
+        &keypath,
+        &custodian,
+        json!({"algorithm":"p256","purpose":"test","offline":true}),
+    )
+    .await;
+    let offline: KeyRecord = serde_json::from_str(&result.2).unwrap();
+    let key = offline.key.id;
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/keys/{key}/activate"),
+            &custodian,
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    let result=json_as(&f,&policypath,&admin,json!({"name":"offline","key":key,"purpose":"test","claims":{},"algorithms":["p256"],"timestamp":"disabled"})).await;
+    assert_eq!(result.0, 201);
+    let offline: Policy = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(
+        json_as(&f, &submit, &requester, input(offline.id)).await.0,
+        403
+    );
+    let windows = format!("/v1/orgs/{org}/keys/{key}/windows");
+    let now = auth::now();
+    let result = json_as(
+        &f,
+        &windows,
+        &custodian,
+        json!({"name":"future","starts_at":now+300,"ends_at":now+600,"cap":5}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let future: ReleaseWindow = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(
+        json_as(&f, &submit, &requester, input(offline.id)).await.0,
+        403
+    );
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/windows/{}/close", future.id),
+            &custodian,
+            json!({})
+        )
+        .await
+        .0,
+        204
+    );
+    let active = json!({"name":"five signatures","starts_at":now-1,"ends_at":now+300,"cap":5});
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &windows,
+            Some(&custodian.0),
+            None,
+            None,
+            active.clone()
+        )
+        .await
+        .0,
+        403
+    );
+    let result = json_as(&f, &windows, &custodian, active.clone()).await;
+    assert_eq!(result.0, 201);
+    let window: ReleaseWindow = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(json_as(&f, &windows, &custodian, active).await.0, 409);
+    let results = futures_util::future::join_all(
+        (0..20).map(|_| json_as(&f, &submit, &requester, input(offline.id))),
+    )
+    .await;
+    assert_eq!(results.iter().filter(|r| r.0 == 201).count(), 5);
+    assert_eq!(results.iter().filter(|r| r.0 == 403).count(), 15);
+    assert_eq!(
+        f.store
+            .tenant(org)
+            .window(window.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .used,
+        5
+    );
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/windows/{}/close", window.id),
+            &custodian,
+            json!({})
+        )
+        .await
+        .0,
+        204
+    );
+    let result = json_as(
+        &f,
+        &windows,
+        &custodian,
+        json!({"name":"expiry check","starts_at":now-100,"ends_at":now+300,"cap":null}),
+    )
+    .await;
+    let window: ReleaseWindow = serde_json::from_str(&result.2).unwrap();
+    sqlx::query("UPDATE brigalow.release_windows SET record=jsonb_set(record,'{ends_at}',to_jsonb($3::bigint)) WHERE org_id=$1 AND id=$2").bind(org).bind(window.id).bind(now-1).execute(&f.admin).await.unwrap();
+    assert_eq!(
+        json_as(&f, &submit, &requester, input(offline.id)).await.0,
+        403
+    );
+    sqlx::query("UPDATE brigalow.release_windows SET record=$3 WHERE org_id=$1 AND id=$2")
+        .bind(org)
+        .bind(window.id)
+        .bind(sqlx::types::Json(&window))
+        .execute(&f.admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        json_as(&f, &submit, &requester, input(offline.id)).await.0,
+        201
+    );
+    // Window can expire while people review: final approval must recheck it.
+    let mut approval_offline = serde_json::to_value(&offline).unwrap();
+    approval_offline["name"] = json!("offline-approvals");
+    approval_offline.as_object_mut().unwrap().remove("id");
+    approval_offline.as_object_mut().unwrap().remove("project");
+    approval_offline["approval"] =
+        json!({"approvers":["alice","bob"],"required":2,"ttl_seconds":120});
+    let result = json_as(&f, &policypath, &admin, approval_offline).await;
+    assert_eq!(result.0, 201);
+    let policy: Policy = serde_json::from_str(&result.2).unwrap();
+    let result = json_as(&f, &submit, &requester, input(policy.id)).await;
+    assert_eq!(result.0, 202);
+    let pending: SignRequest = serde_json::from_str(&result.2).unwrap();
+    let path = format!(
+        "/v1/orgs/{org}/requests/{}/decisions",
+        pending.submission.request_id
+    );
+    assert_eq!(
+        json_as(&f, &path, &alice, json!({"decision":"approve"}))
+            .await
+            .0,
+        200
+    );
+    sqlx::query("UPDATE brigalow.release_windows SET record=jsonb_set(record,'{ends_at}',to_jsonb($3::bigint)) WHERE org_id=$1 AND id=$2").bind(org).bind(window.id).bind(now-1).execute(&f.admin).await.unwrap();
+    let result = json_as(&f, &path, &bob, json!({"decision":"approve"})).await;
+    assert_eq!(result.0, 200);
+    let rejected: SignRequest = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(rejected.state, RequestState::Rejected);
+    assert!(rejected.output.is_none());
+    for (kind, method, path) in brigalow_server::approvals::ROUTES {
+        let foreign_id = match kind {
+            brigalow_server::approvals::Route::Decide => f.objects[1][3],
+            brigalow_server::approvals::Route::CreateWindow => f.objects[1][1],
+            _ => Uuid::new_v4(),
+        };
+        let path = path
+            .replace("{org}", &org.to_string())
+            .replace("{id}", &foreign_id.to_string());
+        let body = match kind {
+            brigalow_server::approvals::Route::Decide => json!({"decision":"approve"}),
+            brigalow_server::approvals::Route::CreateWindow => {
+                json!({"name":"foreign","starts_at":now,"ends_at":now+60,"cap":1})
+            }
+            _ => json!({}),
+        };
+        assert_eq!(
+            request(
+                &f,
+                method,
+                &path,
+                Some(&custodian.0),
+                None,
+                Some(&custodian.1),
+                body
+            )
+            .await
+            .0,
+            404
+        );
+    }
+    assert_eq!(
+        request(
+            &f,
+            "GET",
+            &format!("/orgs/{org}/requests/{}", f.objects[1][3]),
+            Some(&alice.0),
+            None,
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        404
+    );
+    let events = f.store.tenant(org).audit_page(0, 1000).await.unwrap();
+    assert!(events.iter().any(|e| e.action == "notification.delivered"));
+    assert!(events.iter().any(|e| e.action == "notification.failed"));
+    assert!(events.iter().any(|e| e.action == "request.expired"));
+    assert!(events
+        .iter()
+        .any(|e| e.action == "approval.decided" && e.details["decision"] == "deny"));
     f.store.close().await;
     f.admin.close().await;
 }

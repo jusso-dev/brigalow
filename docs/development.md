@@ -1,6 +1,6 @@
 # Local development
 
-Phase 0 provides a development server, a tenant store and an offline audit verifier. It authenticates users and workloads but cannot yet sign artifacts. Do not deploy it to production.
+The development server authenticates humans/workloads and signs digests using lab or PKCS#11 keys, with policy, approvals, release windows and audit. Do not deploy it to production.
 
 ## Automated acceptance run
 
@@ -12,7 +12,7 @@ scripts/e2e.sh --context orbstack
 # scripts/e2e.sh --context default
 ```
 
-The harness uses random Compose project names and loopback-only database ports. All credentials, TLS keys, test records and tokens are disposable. Its `finally` cleanup removes only its own containers, network, locally built SoftHSM image and temporary files; database/token data lives in tmpfs. SoftHSM2 is an in-process PKCS#11 library, so the container provides the test environment, not a remote HSM API. The Linux container generates a disposable token and runs the Rust cryptoki/OpenSSL acceptance client. The harness includes an HTTPS test IdP/JWKS service; a test TSA arrives with signing.
+The harness uses random Compose project names and loopback-only database ports. All credentials, TLS keys, test records and tokens are disposable. Its `finally` cleanup removes only its own containers, network, locally built SoftHSM image and temporary files; database/token data lives in tmpfs. SoftHSM2 is an in-process PKCS#11 library, so the container provides the test environment, not a remote HSM API. The Linux container generates a disposable token and runs the Rust cryptoki/OpenSSL acceptance client. The harness includes an HTTPS test IdP/JWKS service; a generated-key HTTPS OpenSSL TSA verifies timestamping.
 
 `cargo test --workspace` runs pure/CLI/config/redaction tests. `--features integration` additionally requires the harness environment and never silently skips missing infrastructure. CI runs format, clippy (including integration code), unit tests, Compose acceptance tests and a separate full-history secret scan. All Actions are SHA-pinned and runners are GitHub-hosted.
 
@@ -44,7 +44,7 @@ Provision a separate login named `brigalow_runtime`, with membership in `brigalo
 cargo run -p brigalow-server
 ```
 
-`GET /healthz` reports `status`, `mode` and `signing_available: false`. There is no debug/config endpoint. Tenant APIs require a valid session, scoped API token or verified workload identity. Shutdown handles SIGTERM and Ctrl-C. Runtime database failure returns 503. Logs accept application targets only; `RUST_LOG` cannot expose dependency debug output.
+`GET /healthz` reports `status`, `mode` and `signing_available` based on configured identity/backend. There is no debug/config endpoint. Tenant APIs require a valid session, scoped API token or verified workload identity. Shutdown handles SIGTERM and Ctrl-C. Runtime database failure returns 503. Logs accept application targets only; `RUST_LOG` cannot expose dependency debug output.
 
 ## Audit format and limits
 
@@ -60,7 +60,7 @@ Human settings: `client_id`, `authorization_url`, `token_url`, and `group_roles`
 
 Each workload rule has `project`, `policy` and non-empty `claims` mapping verified claim names to exact string values. GitHub examples use `repository`, `ref`, `workflow` and `environment`; use the actual issuer's claim names. Workload audience must be `brigalow:<org>`, with a maximum one-hour lifetime. Configuration is loaded at startup; changing trusted issuers requires restart. Initial identity support uses RS256 and public-client PKCE.
 
-JSON APIs: `GET /v1/orgs/<org>/{projects,keys,policies,requests}/<id>`; `POST /v1/orgs/<org>/projects` with name and unique request_id; `POST /v1/orgs/<org>/tokens` with project, policy and expires_at (Unix seconds); `DELETE /v1/orgs/<org>/tokens/<id>`. Token issuance requires an org admin; credentials are returned only once. Cookie-authenticated mutations require the configured Origin and `X-CSRF-Token`; HTML forms carry the same session CSRF value. Bearer API tokens can only read/submit within their binding and cannot administer projects or credentials. Signing itself arrives in Phase 3.
+JSON APIs: `GET /v1/orgs/<org>/{projects,keys,policies,requests}/<id>`; `POST /v1/orgs/<org>/projects` with name and unique request_id; `POST /v1/orgs/<org>/tokens` with project, policy and expires_at (Unix seconds); `DELETE /v1/orgs/<org>/tokens/<id>`. Token issuance requires an org admin; credentials are returned only once. Cookie-authenticated mutations require the configured Origin and `X-CSRF-Token`; HTML forms carry the same session CSRF value. Bearer API tokens can only read/submit within their binding and cannot administer projects or credentials.
 
 ## Key custody setup (Phase 2)
 
@@ -68,13 +68,13 @@ Backends default to `disabled`. Configure `backend = "pkcs11"`, stable `backend_
 
 Optional TOML `[[trust_anchors]]` entries have `name`, `tier = "private"` or `"external-ca"`, and `file` pointing to a DER certificate. Only operator configuration can classify anchors. `external-ca` is configuration evidence, never a public-trust assertion. Imported chains require code-signing EKU. Software keys retain lab classification even after valid certificate import.
 
-Custodian JSON API: `POST /v1/orgs/<org>/projects/<project>/keys` with `algorithm` (`rsa3072`, `p256`, `ed25519` where supported), `purpose` (`test`/`release`) and `offline` boolean. Read public metadata at `GET /v1/orgs/<org>/keys/<key>`. Lifecycle POST routes below that key: `/csr` with `subject` (RFC 4514 distinguished name); `/certificate` with `chain` (leaf-first arrays of DER bytes); `/activate`, `/disable`, `/retire` with `{}`. All require the existing session Origin/CSRF protection. Certificate import precedes activation for release keys. Disable is permanent; retire requires disabled state. There is no export route. Digest signing arrives in Phase 3; offline keys remain unavailable until release-window controls exist.
+Custodian JSON API: `POST /v1/orgs/<org>/projects/<project>/keys` with `algorithm` (`rsa3072`, `p256`, `ed25519` where supported), `purpose` (`test`/`release`) and `offline` boolean. Read public metadata at `GET /v1/orgs/<org>/keys/<key>`. Lifecycle POST routes below that key: `/csr` with `subject` (RFC 4514 distinguished name); `/certificate` with `chain` (leaf-first arrays of DER bytes); `/activate`, `/disable`, `/retire` with `{}`. All require the existing session Origin/CSRF protection. Certificate import precedes activation for release keys. Disable is permanent; retire requires disabled state. There is no export route. Offline keys require an active release window.
 
 ## Digest signing (Phase 3)
 
 An org/project admin creates a named policy using `POST /v1/orgs/<org>/projects/<project>/policies`: `name` (lowercase letters/digits/hyphens), `key`, `purpose`, `claims` (exact verified claim matches), `algorithms`, and `timestamp` (`disabled`, `optional`, `required`). Release policies require repository/ref/environment rules and `ref_protected = "true"`; only an IdP-verified claim can satisfy this. API credentials carry no invented workload claims, so use a policy that explicitly allows their scope. Policies are immutable in this initial API. Read by UUID through the existing policy route or by name through `/projects/<project>/policies/<name>`.
 
-`POST /v1/orgs/<org>/projects/<project>/sign-requests` accepts `request_id`, `policy` UUID, `digest_alg = "sha256"`, `digest` (32 bytes), `artifact_name`, `format` (`raw` or `cms`) and optional self-reported `metadata`. No artifact upload field exists. Request IDs never retry a signature. Query `/v1/orgs/<org>/requests/<request>` after interruption; a stranded `signing` request needs operator reconciliation. Required timestamp failure produces a failed record with no output. Offline keys cannot sign until release windows ship.
+`POST /v1/orgs/<org>/projects/<project>/sign-requests` accepts `request_id`, `policy` UUID, `digest_alg = "sha256"`, `digest` (32 bytes), `artifact_name`, `format` (`raw` or `cms`) and optional self-reported `metadata`. No artifact upload field exists. Request IDs never retry a signature. Query `/v1/orgs/<org>/requests/<request>` after interruption; a stranded `signing` request needs operator reconciliation. Required timestamp failure produces a failed record with no output. Offline keys require an active release window.
 
 For a TSA, add `[tsa]` with `url`, optional `tls_ca_file` (PEM), `signer_file` (pinned DER TSA certificate) and `anchors` (DER CA paths). The signer must have critical, exclusive timeStamping EKU. This configuration is independent of code-signing trust anchors. No real TSA is needed for tests: Compose includes a generated-key HTTPS OpenSSL TSA.
 
@@ -87,3 +87,15 @@ brig sign --server https://signing.example --org <uuid> --project <uuid> \
 Use `--ca-file` for a private HTTPS CA. Results never overwrite existing files; a successful timestamp is also saved as `<output>.tsr` (DER token). The CLI receives and sends only public metadata and the artifact digest. CMS supports RSA/P-256; raw also supports Ed25519 over SHA-256 digest bytes, not Ed25519ph.
 
 For independent verification, `openssl pkeyutl -verify` checks raw signatures and `openssl cms -verify -binary -inform DER -content artifact.bin -in artifact.cms -CAfile test-ca.pem -purpose any` checks detached CMS. OpenSSL defaults CMS verification to S/MIME purpose; `-purpose any` avoids incorrectly requiring emailProtection on a codeSigning certificate. Brigalow itself requires codeSigning EKU. `openssl ts -verify -token_in` checks the timestamp against the signature bytes and configured TSA CA.
+
+## Approvals and release windows (Phase 4)
+
+Policies may include `approval = { approvers = ["<actor-id>", ...], required = 2, ttl_seconds = 86400 }` (JSON uses the equivalent object). Use the exact issuer-qualified actor IDs shown in verified identity/audit, not display names. Up to 32 distinct approvers, quorum at least one, expiry at most seven days. Requesters and custodians cannot decide, including combined roles. Ensure enough independent eligible people remain to meet quorum.
+
+Submission returns HTTP 202 while pending. `brig sign` polls for up to five minutes; its printed request ID remains authoritative after timeout. Query that ID instead of resubmitting. Review individually at `/orgs/<org>/requests` and `/orgs/<org>/requests/<request>`; POST JSON `{"decision":"approve"}` or `{"decision":"deny"}` to `/v1/orgs/<org>/requests/<request>/decisions`. One deny rejects while pending; once quorum commits the signing intent, decisions close. Duplicate/late decisions return 409. Expiry maintenance runs each second for configured organisations (up to 100 due requests per pass); reads/decisions also enforce expiry.
+
+Custodians create windows at `POST /v1/orgs/<org>/keys/<key>/windows` with `name`, `starts_at`, `ends_at` (Unix seconds) and optional `cap`. Duration is at most seven days. Intervals include start and exclude end; overlapping open windows on the same key are rejected. Read `/v1/orgs/<org>/windows/<window>`; POST `{}` to its `/close` route. Quorum completion rechecks current key/policy/window. Each committed signing attempt consumes one slot, including later backend/TSA failure, so failures never replenish authority. Already committed signing attempts may finish after closure/expiry.
+
+Optional operator-owned TOML `[[notifications]]` entries contain `org`, `url` (HTTPS), `secret_file` (regular 0600 file, generated random secret of at least 32 bytes), and optional `tls_ca_file` (PEM). One endpoint per org. No endpoint can be supplied by an API caller. A pending approval triggers one best-effort attempt with a three-second timeout, no redirects/proxies, and verified TLS. Failure is audited and does not decide or cancel the request. A process interruption can lose this notification; the pending queue remains authoritative. No delivery retries or emails.
+
+Notification JSON contains only `version`, `event = "approval.requested"`, `org`, `project`, `request`, random `event_id` and Unix-second `at`. Header `X-Brigalow-Signature` is standard Base64 HMAC-SHA256 over the exact bytes `brigalow.notification.v1\n` followed by the raw body. Receivers must verify before parsing, reject stale timestamps and deduplicate event IDs. Notifications are informational: their secret cannot approve or sign. `deploy/dev/test_notifications.py` is a loopback-only independent Python HMAC verifier, never a deployment component.

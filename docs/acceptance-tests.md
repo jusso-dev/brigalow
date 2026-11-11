@@ -84,6 +84,10 @@ Verification uses independent tools where possible (OpenSSL), so we aren't only 
 
 `config::tests::at_key_01_startup_guard_and_no_fallback` covers production software refusal and HSM errors without fallback. The server integration lifecycle test covers generated lab labels, release refusal, custodian permissions, all registered key mutation routes for cross-tenant access/CSRF, public-only response fields, invalid chain rejection, lifecycle audit and stale writes after retirement. Phase 2 exit is not claimed until these gates pass locally and on hosted CI.
 
-## Phase 3 automation (implementation in progress)
+## Phase 3 automation
 
 The crypto custody suite independently verifies detached CMS from both software and SoftHSM keys with OpenSSL. `tests/timestamps.rs` obtains generated-key OpenSSL RFC 3161 replies and rejects nonce/imprint/signature/trust/time attacks. Server integration drives `brig sign` as a real process over a loopback HTTPS proxy into axum, captures request bodies to prove digest-only transport, and verifies raw/CMS/timestamp files with OpenSSL. It exercises purpose binding at creation and after direct policy tampering, unknown IDs and replay, CSRF and cross-tenant routes, verified workload claim rejection with named audit reason, and required TSA failure with no persisted or returned signature. Phase completion still requires local and hosted gates.
+
+## Phase 4 automation
+
+Core tests exercise the exact two-minute approval deadline and half-open 10:00–10:30 window. Server integration covers AT-APR-01–03 and AT-REL-01–02 through the actual axum router/Postgres: individual 2-of-3 approval, deny, duplicates, requester and combined custodian exclusions, missing buttons, HTML escaping/CSRF and successful form submissions, durable expiry, and late decisions. Twenty concurrent requests against cap five produce exactly five signatures and fifteen denials. A window expiring during review is rechecked at final approval. Route-registry tests cover tenant isolation. A generated-secret loopback HTTPS receiver independently verifies notification HMAC with Python, checks minimal tenant-bound payloads, and proves redirects are not followed or treated as approval. Phase completion requires these tests in local Compose and hosted CI.

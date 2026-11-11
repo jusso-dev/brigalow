@@ -187,8 +187,30 @@ pub async fn run(args: &[OsString]) -> Result<(), &'static str> {
         .send()
         .await
         .map_err(|_| "signing request interrupted; check request status before retry")?;
-    let result: SignRequest = serde_json::from_slice(&bounded(response).await?)
+    let mut result: SignRequest = serde_json::from_slice(&bounded(response).await?)
         .map_err(|_| "invalid signing response")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    while result.state == RequestState::AwaitingApproval || result.state == RequestState::Signing {
+        if std::time::Instant::now() >= deadline {
+            return Err("approval still pending; query the submitted request ID (do not resubmit)");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let status = base
+            .join(&format!("v1/orgs/{org}/requests/{}", submission.request_id))
+            .map_err(|_| "invalid status URL")?;
+        result = serde_json::from_slice(
+            &bounded(
+                client
+                    .get(status)
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .map_err(|_| "cannot retrieve request status")?,
+            )
+            .await?,
+        )
+        .map_err(|_| "invalid request status")?;
+    }
     if result.state != RequestState::Signed
         || result.submission.request_id != submission.request_id
         || result.submission.digest != submission.digest

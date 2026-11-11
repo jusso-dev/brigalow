@@ -57,6 +57,7 @@ async fn run() -> Result<(), &'static str> {
         .map(|t| t.client())
         .transpose()
         .map_err(|_| "invalid TSA configuration")?;
+    let notifications = brigalow_server::notifications::Notifications::new(&config.notifications)?;
     let store = Store::connect(config.database_options()).await.map_err(|_| {
         tracing::error!(?config, "database startup failed; check availability, TLS, migrations and restricted runtime role");
         "database startup failed"
@@ -84,6 +85,26 @@ async fn run() -> Result<(), &'static str> {
         Err(std::env::VarError::NotPresent) => None,
         Err(_) => return Err("invalid identity configuration path"),
     };
+    let expiry_task = identity.as_ref().map(|identity| {
+        let orgs = identity
+            .config
+            .authorities
+            .iter()
+            .map(|a| a.org_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let store = store.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                for org in &orgs {
+                    if store.tenant(*org).expire_requests().await.is_err() {
+                        tracing::warn!("approval expiry maintenance failed");
+                    }
+                }
+            }
+        })
+    });
     let result = axum::serve(
         listener,
         application(AppState {
@@ -92,10 +113,14 @@ async fn run() -> Result<(), &'static str> {
             identity,
             keys,
             tsa,
+            notifications,
         }),
     )
     .with_graceful_shutdown(shutdown())
     .await;
+    if let Some(task) = expiry_task {
+        task.abort();
+    }
     store.close().await;
     result.map_err(|_| "HTTP server stopped unexpectedly")
 }

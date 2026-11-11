@@ -27,7 +27,7 @@ pub struct Scope {
     pub project: Uuid,
     pub policy: Uuid,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Principal {
     pub org_id: Uuid,

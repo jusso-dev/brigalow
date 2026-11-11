@@ -81,6 +81,7 @@ pub struct Config {
     pub hsm_token: Option<String>,
     pub trust_anchors: Vec<AnchorConfig>,
     pub tsa: Option<TsaConfig>,
+    pub notifications: Vec<crate::notifications::Config>,
     hsm_pin: Option<Secret>,
 }
 impl fmt::Debug for Config {
@@ -116,9 +117,10 @@ struct FileConfig {
     hsm_token: Option<String>,
     trust_anchors: Option<Vec<AnchorConfig>>,
     tsa: Option<TsaConfig>,
+    notifications: Option<Vec<crate::notifications::Config>>,
 }
 
-fn secret_file(path: &Path) -> Result<String, ConfigError> {
+pub(crate) fn secret_file(path: &Path) -> Result<String, ConfigError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -243,6 +245,7 @@ impl Config {
             hsm_token: env("BRIGALOW_HSM_TOKEN")?.or(file.hsm_token),
             trust_anchors: file.trust_anchors.unwrap_or_default(),
             tsa: file.tsa,
+            notifications: file.notifications.unwrap_or_default(),
             mode,
             bind,
             db_host: env("BRIGALOW_DB_HOST")?

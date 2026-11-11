@@ -37,6 +37,7 @@ impl From<crate::auth::AuthError> for WebError {
 impl From<brigalow_store::Error> for WebError {
     fn from(e: brigalow_store::Error) -> Self {
         Self(match e {
+            brigalow_store::Error::Forbidden => StatusCode::FORBIDDEN,
             brigalow_store::Error::Invalid => StatusCode::UNPROCESSABLE_ENTITY,
             brigalow_store::Error::Conflict => StatusCode::CONFLICT,
             brigalow_store::Error::NotFound => StatusCode::NOT_FOUND,
@@ -77,7 +78,7 @@ pub const TENANT_MUTATIONS: [(&str, &str); 3] = [
 pub async fn security(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let h = response.headers_mut();
-    h.insert("content-security-policy","default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'".parse().unwrap());
+    h.insert("content-security-policy","default-src 'none'; connect-src 'self'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'".parse().unwrap());
     h.insert("x-content-type-options", "nosniff".parse().unwrap());
     h.insert("referrer-policy", "no-referrer".parse().unwrap());
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -105,7 +106,7 @@ fn identity(state: &AppState) -> Result<&Identity> {
         .as_deref()
         .ok_or(WebError(StatusCode::SERVICE_UNAVAILABLE))
 }
-fn csrf(credential: &Credential, value: Option<&str>) -> Result<()> {
+pub(crate) fn csrf(credential: &Credential, value: Option<&str>) -> Result<()> {
     let expected = credential
         .csrf
         .as_deref()
@@ -115,14 +116,18 @@ fn csrf(credential: &Credential, value: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
-fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<()> {
+pub(crate) fn check_origin(state: &AppState, headers: &HeaderMap) -> Result<()> {
     let expected = identity(state)?.config.public_url.trim_end_matches('/');
     if headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()) != Some(expected) {
         return Err(WebError(StatusCode::FORBIDDEN));
     }
     Ok(())
 }
-async fn session(state: &AppState, headers: &HeaderMap, org: Uuid) -> Result<Credential> {
+pub(crate) async fn session(
+    state: &AppState,
+    headers: &HeaderMap,
+    org: Uuid,
+) -> Result<Credential> {
     let value = cookie(headers, "__Host-brigalow").ok_or(WebError(StatusCode::UNAUTHORIZED))?;
     let (given, token) = value
         .split_once('.')
@@ -227,6 +232,7 @@ pub async fn object(
         }
     }
     if matches!(kind, RouteKind::Request) {
+        tenant.expire_requests().await?;
         if let Some(request) = tenant.sign_request(id).await? {
             return Ok(Json(
                 serde_json::to_value(request)

@@ -1,6 +1,8 @@
+pub mod approvals;
 pub mod auth;
 pub mod config;
 pub mod keys;
+pub mod notifications;
 pub mod signing;
 pub mod web;
 use axum::{
@@ -21,6 +23,7 @@ pub struct AppState {
     pub identity: Option<Arc<auth::Identity>>,
     pub keys: Option<keys::KeyService>,
     pub tsa: Option<brigalow_crypto::timestamp::Client>,
+    pub notifications: notifications::Notifications,
 }
 pub fn router(store: Store, mode: Mode) -> Router {
     application(AppState {
@@ -29,6 +32,7 @@ pub fn router(store: Store, mode: Mode) -> Router {
         identity: None,
         keys: None,
         tsa: None,
+        notifications: Default::default(),
     })
 }
 pub fn application(state: AppState) -> Router {
@@ -67,7 +71,22 @@ pub fn application(state: AppState) -> Router {
         };
         router = router.route(path, method);
     }
+    for (kind, _, path) in approvals::ROUTES {
+        router = router.route(
+            path,
+            match kind {
+                approvals::Route::Decide => post(approvals::decide),
+                approvals::Route::CreateWindow => post(approvals::create_window),
+                approvals::Route::Window => get(approvals::window),
+                approvals::Route::CloseWindow => post(approvals::close_window),
+            },
+        );
+    }
     router
+        .route("/static/htmx.js", get(approvals::htmx))
+        .route("/orgs/{org}/requests", get(approvals::queue))
+        .route("/orgs/{org}/requests/{id}", get(approvals::page))
+        .route("/orgs/{org}/requests/{id}/decisions", post(approvals::form))
         .route(web::TENANT_MUTATIONS[0].1, post(web::create_project))
         .route(web::TENANT_MUTATIONS[1].1, post(web::issue_token))
         .route(web::TENANT_MUTATIONS[2].1, delete(web::revoke_token))

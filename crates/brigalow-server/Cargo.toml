@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+time = {version="0.3",features=["formatting"]}
 brigalow-crypto = { path = "../brigalow-crypto" }
 brigalow-core = { path = "../brigalow-core" }
 brigalow-store = { path = "../brigalow-store" }
@@ -27,6 +28,7 @@ libc = "0.2"
 
 uuid.workspace = true
 sha2 = "0.10"
+hmac = "0.12"
 base64 = "0.22"
 rand = "0.8"
 subtle = "2"

@@ -7,7 +7,7 @@ Date: 2026-11-11. Status: accepted.
 - `axum` + `tokio` for HTTP; `askama` templates with `htmx` vendored as a static file for the admin UI. No Node.js build.
 - PostgreSQL via `sqlx` with checked-in migrations.
 - PKCS#11 through the `cryptoki` crate; SoftHSM2 for tests.
-- X.509, CMS and hashing through RustCrypto crates (`x509-cert`, `cms`, `sha2`, `p256`, `rsa`, `ed25519-dalek`) or `aws-lc-rs` where a backend needs it. TLS via `rustls`.
+- X.509, CMS and hashing through RustCrypto crates (`x509-cert`, `cms`, `sha2`, `hmac`, `p256`, `rsa`, `ed25519-dalek`) or `aws-lc-rs` where a backend needs it. TLS via `rustls`.
 - `brig` CLI in the same workspace.
 
 ## Why

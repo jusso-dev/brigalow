@@ -31,10 +31,13 @@ pub struct Policy {
     pub claims: BTreeMap<String, String>,
     pub algorithms: Vec<Algorithm>,
     pub timestamp: Timestamp,
+    #[serde(default)]
+    pub approval: Option<crate::approvals::Rule>,
 }
 impl Policy {
     pub fn valid(&self) -> bool {
-        !self.name.is_empty()
+        self.approval.as_ref().is_none_or(|r| r.valid())
+            && !self.name.is_empty()
             && self.name.len() <= 64
             && self
                 .name
@@ -75,9 +78,6 @@ impl Policy {
         {
             return Err("key_binding".into());
         }
-        if key.offline {
-            return Err("release_window_required".into());
-        }
         if !self.algorithms.contains(&key.key.algorithm) {
             return Err("algorithm".into());
         }
@@ -115,6 +115,8 @@ impl Submission {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestState {
+    AwaitingApproval,
+    Expired,
     Signing,
     Signed,
     Failed,
@@ -132,4 +134,23 @@ pub struct SignRequest {
     pub output: Option<Vec<u8>>,
     pub timestamp: Option<Vec<u8>>,
     pub failure: Option<String>,
+    #[serde(default)]
+    pub approval: Option<crate::approvals::Approval>,
+    #[serde(default)]
+    pub principal: Option<Principal>,
+    #[serde(default)]
+    pub window: Option<Uuid>,
+}
+
+impl RequestState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Signing => "signing",
+            Self::Signed => "signed",
+            Self::Failed => "failed",
+            Self::Rejected => "rejected",
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Expired => "expired",
+        }
+    }
 }

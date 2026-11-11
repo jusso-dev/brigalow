@@ -103,6 +103,9 @@ impl Tenant {
             output: None,
             timestamp: None,
             failure: None,
+            approval: None,
+            principal: Some(p.clone()),
+            window: None,
         };
         let row: Option<Option<Json<Policy>>> = sqlx::query_scalar(
             "SELECT record FROM brigalow.policies WHERE org_id=$1 AND id=$2 AND project_id=$3",
@@ -121,17 +124,31 @@ impl Tenant {
             } else {
                 request.failure = Some("key_binding".into());
             }
-            request.policy = Some(policy);
+            let now = Self::now(&mut tx).await?;
             if request.failure.is_none() {
-                request.state = RequestState::Signing;
+                if let Some(rule) = &policy.approval {
+                    request.approval = Some(
+                        brigalow_core::approvals::Approval::new(rule.clone(), p.actor.clone(), now)
+                            .map_err(|_| Error::Invalid)?,
+                    );
+                    request.state = RequestState::AwaitingApproval;
+                } else if self.claim_window(&mut tx, &mut request, now).await? {
+                    request.state = RequestState::Signing;
+                } else {
+                    request.failure = Some("release_window_required_or_exhausted".into());
+                }
             }
-            sqlx::query("INSERT INTO brigalow.sign_requests (org_id,id,project_id,policy_id,record,state) VALUES ($1,$2,$3,$4,$5,$6)").bind(self.org_id).bind(request.submission.request_id).bind(project).bind(request.submission.policy).bind(Json(&request)).bind(if request.state==RequestState::Signing{"signing"}else{"rejected"}).execute(&mut *tx).await?;
+            request.policy = Some(policy);
+            sqlx::query("INSERT INTO brigalow.sign_requests (org_id,id,project_id,policy_id,record,state) VALUES ($1,$2,$3,$4,$5,$6)").bind(self.org_id).bind(request.submission.request_id).bind(project).bind(request.submission.policy).bind(Json(&request)).bind(request.state.as_str()).execute(&mut *tx).await?;
         } else {
             request.failure = Some("unknown_policy_or_project".into());
         }
         let id = request.submission.request_id.to_string();
         self.append(&mut tx,&p.actor,"request.submitted",&id,serde_json::json!({"policy":request.submission.policy,"project":project,"digest":request.submission.digest,"artifact_name":request.submission.artifact_name})).await?;
-        if request.state == RequestState::Signing {
+        if matches!(
+            request.state,
+            RequestState::Signing | RequestState::AwaitingApproval
+        ) {
             self.append(
                 &mut tx,
                 &p.actor,
@@ -143,7 +160,7 @@ impl Tenant {
             self.append(
                 &mut tx,
                 &p.actor,
-                "request.signing",
+                &format!("request.{}", request.state.as_str()),
                 &id,
                 serde_json::json!({}),
             )

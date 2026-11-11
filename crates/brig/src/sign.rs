@@ -190,7 +190,10 @@ pub async fn run(args: &[OsString]) -> Result<(), &'static str> {
     let mut result: SignRequest = serde_json::from_slice(&bounded(response).await?)
         .map_err(|_| "invalid signing response")?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    while result.state == RequestState::AwaitingApproval || result.state == RequestState::Signing {
+    while matches!(
+        result.state,
+        RequestState::AwaitingApproval | RequestState::Gating | RequestState::Signing
+    ) {
         if std::time::Instant::now() >= deadline {
             return Err("approval still pending; query the submitted request ID (do not resubmit)");
         }
@@ -222,20 +225,29 @@ pub async fn run(args: &[OsString]) -> Result<(), &'static str> {
     }
     let output = PathBuf::from(required("--output")?);
     let signature = result.output.ok_or("signature missing")?;
-    let timestamp = PathBuf::from(format!("{}.tsr", output.display()));
-    if output.exists() || (result.timestamp.is_some() && timestamp.exists()) {
+    let mut files = vec![];
+    if let Some(token) = result.timestamp {
+        files.push((PathBuf::from(format!("{}.tsr", output.display())), token));
+    }
+    if let Some(envelope) = result.attestation {
+        files.push((
+            PathBuf::from(format!("{}.dsse.json", output.display())),
+            serde_json::to_vec(&envelope).map_err(|_| "invalid attestation")?,
+        ));
+    }
+    files.push((output, signature));
+    if files.iter().any(|(path, _)| path.exists()) {
         return Err("output already exists");
     }
-    // All mandatory server checks complete before creating any result file.
-    let wrote_timestamp = result.timestamp.is_some();
-    if let Some(token) = result.timestamp {
-        write_new(&timestamp, &token)?;
-    }
-    if let Err(error) = write_new(&output, &signature) {
-        if wrote_timestamp {
-            let _ = std::fs::remove_file(timestamp);
+    let mut created = vec![];
+    for (path, bytes) in &files {
+        if let Err(error) = write_new(path, bytes) {
+            for owned in created {
+                let _ = std::fs::remove_file(owned);
+            }
+            return Err(error);
         }
-        return Err(error);
+        created.push(path);
     }
     println!("Signed request {}", submission.request_id);
     Ok(())

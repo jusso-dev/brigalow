@@ -82,6 +82,7 @@ pub struct Config {
     pub trust_anchors: Vec<AnchorConfig>,
     pub tsa: Option<TsaConfig>,
     pub notifications: Vec<crate::notifications::Config>,
+    pub gates: Vec<crate::gates::Config>,
     hsm_pin: Option<Secret>,
 }
 impl fmt::Debug for Config {
@@ -118,6 +119,7 @@ struct FileConfig {
     trust_anchors: Option<Vec<AnchorConfig>>,
     tsa: Option<TsaConfig>,
     notifications: Option<Vec<crate::notifications::Config>>,
+    gates: Option<Vec<crate::gates::Config>>,
 }
 
 pub(crate) fn secret_file(path: &Path) -> Result<String, ConfigError> {
@@ -246,6 +248,7 @@ impl Config {
             trust_anchors: file.trust_anchors.unwrap_or_default(),
             tsa: file.tsa,
             notifications: file.notifications.unwrap_or_default(),
+            gates: file.gates.unwrap_or_default(),
             mode,
             bind,
             db_host: env("BRIGALOW_DB_HOST")?

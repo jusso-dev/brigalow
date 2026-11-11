@@ -1,6 +1,7 @@
 pub mod approvals;
 pub mod auth;
 pub mod config;
+pub mod gates;
 pub mod keys;
 pub mod notifications;
 pub mod signing;
@@ -24,6 +25,7 @@ pub struct AppState {
     pub keys: Option<keys::KeyService>,
     pub tsa: Option<brigalow_crypto::timestamp::Client>,
     pub notifications: notifications::Notifications,
+    pub gates: gates::Gates,
 }
 pub fn router(store: Store, mode: Mode) -> Router {
     application(AppState {
@@ -33,6 +35,7 @@ pub fn router(store: Store, mode: Mode) -> Router {
         keys: None,
         tsa: None,
         notifications: Default::default(),
+        gates: Default::default(),
     })
 }
 pub fn application(state: AppState) -> Router {

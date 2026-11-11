@@ -106,6 +106,8 @@ impl Tenant {
             approval: None,
             principal: Some(p.clone()),
             window: None,
+            gate_results: vec![],
+            attestation: None,
         };
         let row: Option<Option<Json<Policy>>> = sqlx::query_scalar(
             "SELECT record FROM brigalow.policies WHERE org_id=$1 AND id=$2 AND project_id=$3",
@@ -132,6 +134,8 @@ impl Tenant {
                             .map_err(|_| Error::Invalid)?,
                     );
                     request.state = RequestState::AwaitingApproval;
+                } else if !policy.gates.is_empty() {
+                    request.state = RequestState::Gating;
                 } else if self.claim_window(&mut tx, &mut request, now).await? {
                     request.state = RequestState::Signing;
                 } else {
@@ -147,7 +151,7 @@ impl Tenant {
         self.append(&mut tx,&p.actor,"request.submitted",&id,serde_json::json!({"policy":request.submission.policy,"project":project,"digest":request.submission.digest,"artifact_name":request.submission.artifact_name})).await?;
         if matches!(
             request.state,
-            RequestState::Signing | RequestState::AwaitingApproval
+            RequestState::Signing | RequestState::AwaitingApproval | RequestState::Gating
         ) {
             self.append(
                 &mut tx,

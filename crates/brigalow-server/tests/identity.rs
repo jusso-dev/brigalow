@@ -173,6 +173,7 @@ async fn fixture() -> Fixture {
     )
     .unwrap();
     let router = application(AppState {
+        gates: Default::default(),
         notifications: Default::default(),
         tsa: Some(tsa.clone()),
         keys: Some(keys.clone()),
@@ -1560,6 +1561,7 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
     )
     .unwrap();
     f.router = application(AppState {
+        gates: Default::default(),
         notifications: Default::default(),
         store: f.store.clone(),
         identity: Some(f.identity.clone()),
@@ -1600,6 +1602,7 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
         .await
         .unwrap();
     f.router = application(AppState {
+        gates: Default::default(),
         notifications: Default::default(),
         store: f.store.clone(),
         identity: Some(f.identity.clone()),
@@ -1760,6 +1763,7 @@ async fn at_apr_01_03_and_rel_01_02_individual_decisions_and_atomic_caps() {
     };
     let notifications = brigalow_server::notifications::Notifications::new(&[config]).unwrap();
     f.router = application(AppState {
+        gates: Default::default(),
         notifications: notifications.clone(),
         store: f.store.clone(),
         identity: Some(f.identity.clone()),
@@ -2192,6 +2196,311 @@ async fn at_apr_01_03_and_rel_01_02_individual_decisions_and_atomic_caps() {
     assert!(events
         .iter()
         .any(|e| e.action == "approval.decided" && e.details["decision"] == "deny"));
+    f.store.close().await;
+    f.admin.close().await;
+}
+
+struct CountSigning {
+    backend: Arc<dyn brigalow_crypto::KeyBackend>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl brigalow_crypto::KeyBackend for CountSigning {
+    fn generate(
+        &self,
+        a: brigalow_crypto::Algorithm,
+        p: brigalow_core::Purpose,
+    ) -> brigalow_crypto::Result<brigalow_crypto::Key> {
+        self.backend.generate(a, p)
+    }
+    fn public_key(&self, k: &brigalow_crypto::Key) -> brigalow_crypto::Result<Vec<u8>> {
+        self.backend.public_key(k)
+    }
+    fn disable(&self, k: &brigalow_crypto::Key) -> brigalow_crypto::Result<()> {
+        self.backend.disable(k)
+    }
+    fn is_lab(&self) -> bool {
+        self.backend.is_lab()
+    }
+    fn sign_digest(
+        &self,
+        k: &brigalow_crypto::Key,
+        a: brigalow_crypto::DigestAlgorithm,
+        d: &[u8],
+    ) -> brigalow_crypto::Result<Vec<u8>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.backend.sign_digest(k, a, d)
+    }
+    fn sign_message(&self, k: &brigalow_crypto::Key, m: &[u8]) -> brigalow_crypto::Result<Vec<u8>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.backend.sign_message(k, m)
+    }
+}
+
+#[tokio::test]
+async fn at_gate_01_02_and_att_01_signed_checks_and_claim_bound_provenance() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use brigalow_core::{
+        keys::KeyRecord,
+        policy::{Policy, RequestState, SignRequest},
+    };
+    use sha2::{Digest, Sha256};
+    use std::{io::BufRead, os::unix::fs::PermissionsExt};
+    let mut f = fixture().await;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    f.keys.backend = Arc::new(CountSigning {
+        backend: f.keys.backend.clone(),
+        calls: calls.clone(),
+    });
+    let org = f.orgs[0];
+    let project = f.objects[0][0];
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let secret = d.join("gate-secret");
+    std::fs::write(&secret, auth::random_secret()).unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut receiver = ChildGuard(
+        std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deploy/dev/test_gate.py"
+            ))
+            .arg(std::env::var("BRIGALOW_TEST_TLS_CERT_FILE").unwrap())
+            .arg(std::env::var("BRIGALOW_TEST_TLS_KEY_FILE").unwrap())
+            .arg(&secret)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut port = String::new();
+    std::io::BufReader::new(receiver.0.stdout.take().unwrap())
+        .read_line(&mut port)
+        .unwrap();
+    let configs: Vec<_> = [
+        "pass",
+        "fail",
+        "timeout",
+        "bad-hmac",
+        "replay",
+        "wrong-digest",
+        "oversize",
+        "redirect",
+        "rebuild",
+    ]
+    .into_iter()
+    .map(|name| brigalow_server::gates::Config {
+        org,
+        name: name.into(),
+        url: format!("https://127.0.0.1:{}/{name}", port.trim()),
+        secret_file: secret.clone(),
+        tls_ca_file: Some(std::env::var("BRIGALOW_TEST_DB_CA_FILE").unwrap().into()),
+        timeout_ms: if name == "timeout" { 500 } else { 3000 },
+    })
+    .collect();
+    let gates = brigalow_server::gates::Gates::new(&configs).unwrap();
+    assert!(!gates.configured(f.orgs[1], &["pass".into()]));
+    f.router = application(AppState {
+        gates,
+        notifications: Default::default(),
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    let custodian = role_session(&f, "custodian", vec![Role::KeyCustodian]).await;
+    let submitter = role_session(&f, "submitter", vec![Role::Submitter]).await;
+    let admin = login(&f, org).await;
+    let result = json_as(
+        &f,
+        &format!("/v1/orgs/{org}/projects/{project}/keys"),
+        &custodian,
+        json!({"algorithm":"p256","purpose":"test","offline":false}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let key: KeyRecord = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/keys/{}/activate", key.key.id),
+            &custodian,
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    let policies = format!("/v1/orgs/{org}/projects/{project}/policies");
+    let submit = format!("/v1/orgs/{org}/projects/{project}/sign-requests");
+    let input = |policy, digest: Vec<u8>| json!({"request_id":Uuid::new_v4(),"policy":policy,"digest_alg":"sha256","digest":digest,"artifact_name":"fixture.bin","format":"raw","metadata":{"repository":"attacker/repo","sha":"attacker-commit","workflow":"attacker-workflow","builder":"attacker-builder"}});
+    let policy_input = |name: &str| json!({"name":name,"key":key.key.id,"purpose":"test","claims":{},"algorithms":["p256"],"timestamp":"disabled","gates":[name]});
+    assert_eq!(
+        json_as(&f, &policies, &admin, policy_input("unknown"))
+            .await
+            .0,
+        422
+    );
+    for name in [
+        "pass",
+        "fail",
+        "timeout",
+        "bad-hmac",
+        "replay",
+        "wrong-digest",
+        "oversize",
+        "redirect",
+    ] {
+        let result = json_as(&f, &policies, &admin, policy_input(name)).await;
+        assert_eq!(result.0, 201);
+        let policy: Policy = serde_json::from_str(&result.2).unwrap();
+        let body = input(policy.id, vec![7; 32]);
+        let id: Uuid = serde_json::from_value(body["request_id"].clone()).unwrap();
+        let before = calls.load(std::sync::atomic::Ordering::SeqCst);
+        let result = json_as(&f, &submit, &submitter, body).await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) - before,
+            usize::from(name == "pass")
+        );
+        let stored = f.store.tenant(org).sign_request(id).await.unwrap().unwrap();
+        assert_eq!(
+            result.0,
+            if name == "pass" { 201 } else { 403 },
+            "gate {name}: {:?} {:?}",
+            stored.failure,
+            stored.gate_results
+        );
+        assert_eq!(stored.gate_results.len(), 1);
+        assert_eq!(stored.gate_results[0].passed, name == "pass");
+        if name != "pass" {
+            assert_eq!(stored.state, RequestState::Rejected);
+            assert!(stored.output.is_none());
+            assert!(stored.attestation.is_none());
+            assert!(!f
+                .store
+                .tenant(org)
+                .audit_page(0, 1000)
+                .await
+                .unwrap()
+                .iter()
+                .any(|e| e.subject == id.to_string() && e.action == "request.signing"));
+        }
+    }
+    let fixture = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/gates/hash_validation.py"
+        ))
+        .arg("--fixture")
+        .output()
+        .unwrap();
+    assert!(fixture.status.success());
+    let digest = Sha256::digest(&fixture.stdout);
+    let result = json_as(&f, &policies, &admin, policy_input("rebuild")).await;
+    let mut policy: Policy = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(
+        json_as(&f, &submit, &submitter, input(policy.id, digest.to_vec()))
+            .await
+            .0,
+        201
+    );
+    assert_eq!(
+        json_as(&f, &submit, &submitter, input(policy.id, vec![8; 32]))
+            .await
+            .0,
+        403
+    );
+    // Bind this real policy to the fixture's verified workload rule; no invented claims.
+    policy.id = f.objects[0][2];
+    policy.name = "workload-provenance".into();
+    policy.attestation = true;
+    sqlx::query(
+        "UPDATE brigalow.policies SET name=$3,key_id=$4,record=$5 WHERE org_id=$1 AND id=$2",
+    )
+    .bind(org)
+    .bind(policy.id)
+    .bind(&policy.name)
+    .bind(key.key.id)
+    .bind(sqlx::types::Json(&policy))
+    .execute(&f.admin)
+    .await
+    .unwrap();
+    let token=mint(&f,json!({"aud":format!("brigalow:{org}"),"repository":"acme/app","ref":"refs/heads/main","environment":"release","workflow":"build","sha":"0123456789abcdef0123456789abcdef01234567"}),false,"RS256").await;
+    let body = input(policy.id, digest.to_vec());
+    let result = request(&f, "POST", &submit, None, Some(&token), None, body).await;
+    assert_eq!(result.0, 201);
+    let signed: SignRequest = serde_json::from_str(&result.2).unwrap();
+    let envelope = signed.attestation.unwrap();
+    assert_eq!(envelope["payloadType"], "application/vnd.in-toto+json");
+    assert_eq!(envelope["signatures"][0]["keyid"], key.key.id.to_string());
+    let payload = STANDARD
+        .decode(envelope["payload"].as_str().unwrap())
+        .unwrap();
+    let statement: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(statement["_type"], "https://in-toto.io/Statement/v1");
+    assert_eq!(statement["predicateType"], "https://slsa.dev/provenance/v1");
+    assert_eq!(
+        statement["subject"][0]["digest"]["sha256"],
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(
+        statement["predicate"]["buildDefinition"]["externalParameters"]["repository"],
+        "acme/app"
+    );
+    assert_eq!(
+        statement["predicate"]["runDetails"]["builder"]["id"],
+        f.issuer
+    );
+    assert!(!String::from_utf8(payload.clone())
+        .unwrap()
+        .contains("attacker"));
+    // Independently reconstruct DSSE PAE with Python; verify its signature using OpenSSL.
+    std::fs::write(
+        d.join("envelope.json"),
+        serde_json::to_vec(&envelope).unwrap(),
+    )
+    .unwrap();
+    let reconstructed=std::process::Command::new("python3").arg("-c").arg("import json,base64,pathlib; e=json.loads(pathlib.Path('envelope.json').read_text()); t=e['payloadType'].encode(); p=base64.b64decode(e['payload']); pathlib.Path('pae').write_bytes(b'DSSEv1 '+str(len(t)).encode()+b' '+t+b' '+str(len(p)).encode()+b' '+p)").current_dir(d).status().unwrap();
+    assert!(reconstructed.success());
+    std::fs::write(
+        d.join("signature"),
+        STANDARD
+            .decode(envelope["signatures"][0]["sig"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(d.join("public.der"), &key.public_key).unwrap();
+    let verify = || {
+        std::process::Command::new("openssl")
+            .current_dir(d)
+            .args([
+                "dgst",
+                "-sha256",
+                "-verify",
+                "public.der",
+                "-keyform",
+                "DER",
+                "-signature",
+                "signature",
+                "pae",
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(verify());
+    std::fs::write(d.join("pae"), b"tampered").unwrap();
+    assert!(!verify());
+    // Attestation cannot silently substitute metadata for missing verified claims.
+    assert_eq!(
+        json_as(&f, &submit, &submitter, input(policy.id, digest.to_vec()))
+            .await
+            .0,
+        403
+    );
     f.store.close().await;
     f.admin.close().await;
 }

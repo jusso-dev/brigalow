@@ -76,7 +76,7 @@ async fn decide_as(
             state.mode == crate::config::Mode::Lab || keys.backend.is_lab(),
         )
         .await?;
-    if request.state == RequestState::Signing {
+    if matches!(request.state, RequestState::Signing | RequestState::Gating) {
         crate::signing::complete(state, request).await
     } else {
         Ok((StatusCode::OK, Json(request)))
@@ -185,6 +185,7 @@ struct RequestTemplate<'a> {
     metadata: Vec<(&'a str, &'a str)>,
     decisions: Vec<(&'a str, &'a str)>,
     approval_summary: String,
+    gates: Vec<(String, String)>,
     can_decide: bool,
     csrf: &'a str,
 }
@@ -278,6 +279,30 @@ pub async fn page(
                                 "Denied"
                             },
                         )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        gates: request
+            .policy
+            .as_ref()
+            .map(|p| {
+                p.gates
+                    .iter()
+                    .map(|name| {
+                        let status = request
+                            .gate_results
+                            .iter()
+                            .find(|r| &r.gate == name)
+                            .map(|r| {
+                                if r.passed {
+                                    "Passed".to_string()
+                                } else {
+                                    format!("Failed: {}", r.reason)
+                                }
+                            })
+                            .unwrap_or_else(|| "Not run yet".into());
+                        (name.clone(), status)
                     })
                     .collect()
             })

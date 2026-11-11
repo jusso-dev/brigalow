@@ -33,10 +33,27 @@ pub struct Policy {
     pub timestamp: Timestamp,
     #[serde(default)]
     pub approval: Option<crate::approvals::Rule>,
+    #[serde(default)]
+    pub gates: Vec<String>,
+    #[serde(default)]
+    pub attestation: bool,
 }
 impl Policy {
     pub fn valid(&self) -> bool {
         self.approval.as_ref().is_none_or(|r| r.valid())
+            && self.gates.len() <= 8
+            && self.gates.iter().all(|g| {
+                !g.is_empty()
+                    && g.len() <= 64
+                    && g.bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+            && self
+                .gates
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == self.gates.len()
             && !self.name.is_empty()
             && self.name.len() <= 64
             && self
@@ -81,6 +98,13 @@ impl Policy {
         if !self.algorithms.contains(&key.key.algorithm) {
             return Err("algorithm".into());
         }
+        if self.attestation
+            && ["iss", "sub", "repository", "sha", "workflow"]
+                .iter()
+                .any(|c| principal.claims.get(*c).is_none_or(|s| s.is_empty()))
+        {
+            return Err("attestation_claims_required".into());
+        }
         for (name, value) in &self.claims {
             if principal.claims.get(name) != Some(value) {
                 return Err(format!("claim:{name}"));
@@ -116,6 +140,7 @@ impl Submission {
 #[serde(rename_all = "snake_case")]
 pub enum RequestState {
     AwaitingApproval,
+    Gating,
     Expired,
     Signing,
     Signed,
@@ -140,11 +165,16 @@ pub struct SignRequest {
     pub principal: Option<Principal>,
     #[serde(default)]
     pub window: Option<Uuid>,
+    #[serde(default)]
+    pub gate_results: Vec<crate::gates::Result>,
+    #[serde(default)]
+    pub attestation: Option<serde_json::Value>,
 }
 
 impl RequestState {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Gating => "gating",
             Self::Signing => "signing",
             Self::Signed => "signed",
             Self::Failed => "failed",

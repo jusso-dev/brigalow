@@ -57,6 +57,7 @@ async fn run() -> Result<(), &'static str> {
         .map(|t| t.client())
         .transpose()
         .map_err(|_| "invalid TSA configuration")?;
+    let gates = brigalow_server::gates::Gates::new(&config.gates)?;
     let notifications = brigalow_server::notifications::Notifications::new(&config.notifications)?;
     let store = Store::connect(config.database_options()).await.map_err(|_| {
         tracing::error!(?config, "database startup failed; check availability, TLS, migrations and restricted runtime role");
@@ -114,6 +115,7 @@ async fn run() -> Result<(), &'static str> {
             keys,
             tsa,
             notifications,
+            gates,
         }),
     )
     .with_graceful_shutdown(shutdown())

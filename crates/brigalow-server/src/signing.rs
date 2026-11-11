@@ -41,6 +41,10 @@ pub struct PolicyInput {
     pub timestamp: Timestamp,
     #[serde(default)]
     pub approval: Option<brigalow_core::approvals::Rule>,
+    #[serde(default)]
+    pub gates: Vec<String>,
+    #[serde(default)]
+    pub attestation: bool,
 }
 pub async fn create_policy(
     State(state): State<AppState>,
@@ -69,7 +73,12 @@ pub async fn create_policy(
         algorithms: input.algorithms,
         timestamp: input.timestamp,
         approval: input.approval,
+        gates: input.gates,
+        attestation: input.attestation,
     };
+    if !state.gates.configured(org, &policy.gates) {
+        return Err(WebError(StatusCode::UNPROCESSABLE_ENTITY));
+    }
     let backend = state
         .keys
         .as_ref()
@@ -198,9 +207,27 @@ pub async fn complete(
             .ok_or(WebError(StatusCode::INTERNAL_SERVER_ERROR))?
             .org_id,
     );
+    if request.state == RequestState::Gating {
+        let outcomes = state.gates.run(&request).await;
+        let service = state
+            .keys
+            .as_ref()
+            .ok_or(WebError(StatusCode::SERVICE_UNAVAILABLE))?;
+        request = tenant
+            .finish_gates(
+                request.submission.request_id,
+                outcomes,
+                state.mode == crate::config::Mode::Lab || service.backend.is_lab(),
+            )
+            .await?;
+        if request.state != RequestState::Signing {
+            return Err(WebError(StatusCode::FORBIDDEN));
+        }
+    }
     let result = produce(state, &request).await;
     match result {
-        Ok((output, timestamp)) => {
+        Ok((output, timestamp, attestation)) => {
+            request.attestation = attestation;
             request.output = Some(output);
             request.timestamp = timestamp;
             request.state = RequestState::Signed;
@@ -216,10 +243,11 @@ pub async fn complete(
     }
     Ok((StatusCode::CREATED, Json(request)))
 }
+type Produced = (Vec<u8>, Option<Vec<u8>>, Option<serde_json::Value>);
 async fn produce(
     state: &AppState,
     request: &SignRequest,
-) -> std::result::Result<(Vec<u8>, Option<Vec<u8>>), brigalow_crypto::Error> {
+) -> std::result::Result<Produced, brigalow_crypto::Error> {
     use brigalow_crypto::{certificates, cms, Error};
     let service = state.keys.as_ref().ok_or(Error::Unavailable)?;
     let key = request.key.as_ref().ok_or(Error::Unavailable)?;
@@ -277,5 +305,19 @@ async fn produce(
             output = cms::attach_timestamp(&output, token)?;
         }
     }
-    Ok((output, token))
+    let attestation = if policy.attestation {
+        let backend = service.backend.clone();
+        let key = request.key.as_ref().ok_or(Error::Unavailable)?.key.clone();
+        let request = request.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                brigalow_crypto::attestation::provenance(backend.as_ref(), &key, &request)
+            })
+            .await
+            .map_err(|_| Error::Backend)??,
+        )
+    } else {
+        None
+    };
+    Ok((output, token, attestation))
 }

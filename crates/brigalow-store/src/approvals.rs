@@ -120,7 +120,7 @@ impl Tenant {
         .await?;
         Ok(true)
     }
-    async fn persist_request(
+    pub(crate) async fn persist_request(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         request: &SignRequest,
@@ -207,14 +207,20 @@ impl Tenant {
                     .authorise(&key, request.principal.as_ref().ok_or(Error::Invalid)?, lab)
                     .err();
                 request.key = Some(key);
+                let gating = !policy.gates.is_empty();
                 request.policy = Some(policy);
                 if request.failure.is_none()
+                    && !gating
                     && !self.claim_window(&mut tx, &mut request, now).await?
                 {
                     request.failure = Some("release_window_required_or_exhausted".into());
                 }
                 request.state = if request.failure.is_none() {
-                    RequestState::Signing
+                    if gating {
+                        RequestState::Gating
+                    } else {
+                        RequestState::Signing
+                    }
                 } else {
                     RequestState::Rejected
                 };

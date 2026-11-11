@@ -1,3 +1,9 @@
 target
 .git
 .env*
+**/target
+fuzz/corpus
+fuzz/artifacts
+fuzz/coverage
+dist
+**/__pycache__

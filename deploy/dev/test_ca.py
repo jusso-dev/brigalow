@@ -71,4 +71,23 @@ db_ca_file = "/test-secrets/ca.crt"
         run("openssl", "crl", "-in", name + ".pem", "-verify", "-CAfile", "issuer.pem", "-noout")
         run("openssl", "verify", "-purpose", "any", "-CAfile", "root.pem", "-untrusted", "issuer.pem",
             "-CRLfile", name + ".pem", "-crl_check", "leaf.pem", ok=(name == "before"))
+    # A separate HSM audit key and ordinary append-only application DB role.
+    runtime = (root / "runtime.toml").read_text().replace(db_user, "brigalow_runtime")
+    (root / "runtime.toml").write_text(runtime)
+    audit = "/work/target/debug/brigalow-audit"
+    run(audit, "init", "--output", "audit-key")
+    run(audit, "checkpoint", "--org", org, "--key", "audit-key/audit-key.json", "--output", "checkpoint")
+    verify = ["/work/target/debug/brig", "audit", "verify", "checkpoint/audit.jsonl", "--checkpoint",
+              "checkpoint/checkpoint.json", "--public-key", "audit-key/audit-public.der"]
+    run(*verify)
+    pathlib.Path("checkpoint.digest").write_bytes(__import__("hashlib").sha256(pathlib.Path("checkpoint/checkpoint.bytes").read_bytes()).digest())
+    independent = ["openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER", "-inkey", "audit-key/audit-public.der",
+                   "-sigfile", "checkpoint/checkpoint.sig", "-in", "checkpoint.digest", "-pkeyopt", "digest:sha256"]
+    run(*independent)
+    pathlib.Path("checkpoint.digest").write_bytes(__import__("hashlib").sha256(b"tampered checkpoint").digest())
+    run(*independent, ok=False)
+    lines = pathlib.Path("checkpoint/audit.jsonl").read_bytes().splitlines(keepends=True)
+    pathlib.Path("checkpoint/audit.jsonl").write_bytes(b"".join(lines[:-1]))
+    run(*verify, ok=False)
+
 print("CA operator CLI: HSM issuer survives restart, duplicate day refused, persisted outputs recovered, CRL revocation verified")

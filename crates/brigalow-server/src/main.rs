@@ -109,6 +109,7 @@ async fn run() -> Result<(), &'static str> {
     let result = axum::serve(
         listener,
         application(AppState {
+            rate_limit: config.rate_limit,
             store: store.clone(),
             mode: config.mode,
             identity,

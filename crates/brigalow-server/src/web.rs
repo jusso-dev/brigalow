@@ -138,12 +138,14 @@ pub(crate) async fn session(
     if token.len() > 128 {
         return Err(WebError(StatusCode::UNAUTHORIZED));
     }
-    state
+    let credential = state
         .store
         .tenant(org)
         .credential(&auth::hash(token), "session")
         .await?
-        .ok_or(WebError(StatusCode::UNAUTHORIZED))
+        .ok_or(WebError(StatusCode::UNAUTHORIZED))?;
+    crate::rate_limit::check(state, &credential.principal, &credential.id.to_string()).await?;
+    Ok(credential)
 }
 pub async fn authenticate(
     state: &AppState,
@@ -174,9 +176,18 @@ pub async fn authenticate(
                 .credential(&auth::hash(secret), "api")
                 .await?
                 .ok_or(WebError(StatusCode::UNAUTHORIZED))?;
+            crate::rate_limit::check(state, &credential.principal, &credential.id.to_string())
+                .await?;
             return Ok(credential.principal);
         }
-        return Ok(identity(state)?.verify_workload(org, token, scope).await?);
+        let principal = identity(state)?.verify_workload(org, token, scope).await?;
+        // Stable verified workload identity/scope prevents rotating JWTs from resetting the budget.
+        let credential = auth::hash(
+            &serde_json::to_string(&(&principal.actor, &principal.scope))
+                .map_err(|_| WebError(StatusCode::INTERNAL_SERVER_ERROR))?,
+        );
+        crate::rate_limit::check(state, &principal, &credential).await?;
+        return Ok(principal);
     }
     let credential = session(state, headers, org).await?;
     if mutating {

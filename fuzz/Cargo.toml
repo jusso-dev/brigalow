@@ -1,0 +1,35 @@
+[package]
+name = "brigalow-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+[package.metadata]
+cargo-fuzz = true
+[workspace]
+members = ["."]
+[dependencies]
+libfuzzer-sys = "0.4"
+brigalow-core = { path = "../crates/brigalow-core" }
+brigalow-crypto = { path = "../crates/brigalow-crypto" }
+serde_json = "1"
+der = "0.7"
+cms = "0.2.3"
+x509-cert = "0.2.5"
+[[bin]]
+name = "requests"
+path = "fuzz_targets/requests.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "certificates"
+path = "fuzz_targets/certificates.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "audit"
+path = "fuzz_targets/audit.rs"
+test = false
+doc = false
+bench = false

@@ -191,3 +191,59 @@ mod tests {
         assert!(Verifier::default().finish().is_err());
     }
 }
+
+/// Externally retain the latest checkpoint and independently pin its audit public key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Checkpoint {
+    pub version: u8,
+    pub org_id: Uuid,
+    pub seq: u64,
+    pub entry_hash: String,
+    pub at: i64,
+    pub key_id: Uuid,
+    pub algorithm: crate::keys::Algorithm,
+}
+impl Checkpoint {
+    pub fn message(&self) -> Result<Vec<u8>, AuditError> {
+        if self.version != 1
+            || self.seq == 0
+            || self.seq > MAX_INTEGER
+            || self.at < 0
+            || self.at as u64 > MAX_INTEGER
+            || self.org_id.is_nil()
+            || self.key_id.is_nil()
+            || self.entry_hash.len() != 64
+            || !self
+                .entry_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(AuditError {
+                seq: self.seq,
+                reason: "invalid checkpoint",
+            });
+        }
+        let mut bytes = b"brigalow.audit.checkpoint.v1\n".to_vec();
+        bytes.extend(
+            serde_json_canonicalizer::to_vec(self).map_err(|_| AuditError {
+                seq: self.seq,
+                reason: "invalid checkpoint",
+            })?,
+        );
+        Ok(bytes)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedCheckpoint {
+    pub checkpoint: Checkpoint,
+    pub signature: Vec<u8>,
+}
+impl Verifier {
+    pub fn matches_checkpoint(&self, checkpoint: &Checkpoint) -> bool {
+        self.count == checkpoint.seq
+            && self.org_id == Some(checkpoint.org_id)
+            && self.previous.as_ref() == Some(&checkpoint.entry_hash)
+    }
+}

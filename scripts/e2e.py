@@ -20,6 +20,14 @@ project = "brigalow-test-" + secrets.token_hex(6)
 with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
     env = os.environ.copy()
     env["BRIGALOW_TEST_SECRETS"] = directory
+    release = Path(env.get("BRIGALOW_RELEASE_DIR", str(Path(directory)/"release"))).resolve()
+    if "BRIGALOW_RELEASE_DIR" not in env:
+        release.mkdir()
+        (release/"fixture.bin").write_bytes(b"ephemeral lab release fixture")
+        import hashlib
+        (release/"manifest.json").write_text(json.dumps({"version":1,"trust":"lab","files":{"fixture.bin":hashlib.sha256((release/"fixture.bin").read_bytes()).hexdigest()}}))
+    assert (release/"manifest.json").is_file(), "release manifest required"
+    env["BRIGALOW_RELEASE_DIR"] = str(release)
     for name in ("postgres_password", "app_password", "hsm_pin"):
         path = Path(directory) / name
         path.touch(mode=0o600)
@@ -92,6 +100,9 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
                            "BRIGALOW_DB_CA_FILE": env["BRIGALOW_TEST_DB_CA_FILE"],
                            "BRIGALOW_DB_PASSWORD": (Path(directory)/"app_password").read_text(),
                            "BRIGALOW_HSM_PIN": (Path(directory)/"hsm_pin").read_text()})
+        run(compose + ["exec", "-T", "softhsm", "python3", "/hsm_test.py"])
+        from backup_restore import drill
+        drill(compose, env, root, directory, str(Path(metadata["target_directory"]) / "debug/brig"))
         log_path = Path(directory)/"server.log"
         with log_path.open("w+") as log:
             process = subprocess.Popen([server], cwd=root, env=server_env, stdout=log, stderr=log)
@@ -140,7 +151,6 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
                 assert (Path(directory)/name).read_text() not in output, "AT-OPS-01 secret disclosure"
             assert "LAB MODE" in output
         print("AT-OPS-01: live health/debug responses and server logs contain no generated secrets")
-        run(compose + ["exec", "-T", "softhsm", "python3", "/hsm_test.py"])
     finally:
         # Only this harness's uniquely named resources. Data lives in tmpfs.
         subprocess.run(compose + ["--profile", "tools", "down", "--remove-orphans", "--rmi", "local"], cwd=root, env=env, check=True)

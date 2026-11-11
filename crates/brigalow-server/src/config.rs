@@ -67,6 +67,7 @@ impl TsaConfig {
 }
 
 pub struct Config {
+    pub rate_limit: crate::rate_limit::RateLimit,
     pub mode: Mode,
     pub bind: SocketAddr,
     db_host: String,
@@ -103,6 +104,7 @@ pub struct ConfigError(&'static str);
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
+    rate_limit: Option<crate::rate_limit::RateLimit>,
     mode: Option<Mode>,
     bind: Option<SocketAddr>,
     db_host: Option<String>,
@@ -236,7 +238,12 @@ impl Config {
         if backend == Backend::Software && mode != Mode::Lab {
             return Err(ConfigError("software backend requires lab mode"));
         }
+        let rate_limit = file.rate_limit.unwrap_or_default();
+        if !rate_limit.valid() {
+            return Err(ConfigError("invalid rate limit"));
+        }
         Ok(Self {
+            rate_limit,
             backend,
             backend_id: env("BRIGALOW_BACKEND_ID")?
                 .or(file.backend_id)

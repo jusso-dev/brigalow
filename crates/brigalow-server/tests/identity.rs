@@ -177,6 +177,7 @@ async fn fixture() -> Fixture {
     )
     .unwrap();
     let router = application(AppState {
+        rate_limit: Default::default(),
         gates: Default::default(),
         notifications: Default::default(),
         tsa: Some(tsa.clone()),
@@ -1565,6 +1566,7 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
     )
     .unwrap();
     f.router = application(AppState {
+        rate_limit: Default::default(),
         gates: Default::default(),
         notifications: Default::default(),
         store: f.store.clone(),
@@ -1606,6 +1608,7 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
         .await
         .unwrap();
     f.router = application(AppState {
+        rate_limit: Default::default(),
         gates: Default::default(),
         notifications: Default::default(),
         store: f.store.clone(),
@@ -1767,6 +1770,7 @@ async fn at_apr_01_03_and_rel_01_02_individual_decisions_and_atomic_caps() {
     };
     let notifications = brigalow_server::notifications::Notifications::new(&[config]).unwrap();
     f.router = application(AppState {
+        rate_limit: Default::default(),
         gates: Default::default(),
         notifications: notifications.clone(),
         store: f.store.clone(),
@@ -1964,7 +1968,7 @@ async fn at_apr_01_03_and_rel_01_02_individual_decisions_and_atomic_caps() {
         f.router.clone().oneshot(missing).await.unwrap().status(),
         403
     );
-    let mut expiry_policy = policy_input;
+    let mut expiry_policy = policy_input.clone();
     expiry_policy["name"] = json!("expiry");
     expiry_policy["approval"]["ttl_seconds"] = json!(2);
     let result = json_as(&f, &policypath, &admin, expiry_policy).await;
@@ -2200,6 +2204,18 @@ async fn at_apr_01_03_and_rel_01_02_individual_decisions_and_atomic_caps() {
     assert!(events
         .iter()
         .any(|e| e.action == "approval.decided" && e.details["decision"] == "deny"));
+    // Retain a real API-created pending request for the subsequent disposable restore drill.
+    let mut restore_policy = policy_input;
+    restore_policy["name"] = json!("restore-pending");
+    restore_policy["approval"]["ttl_seconds"] = json!(86400);
+    let restored = json_as(&f, &policypath, &admin, restore_policy).await;
+    assert_eq!(restored.0, 201);
+    let restored: Policy = serde_json::from_str(&restored.2).unwrap();
+    assert_eq!(
+        json_as(&f, &submit, &requester, input(restored.id)).await.0,
+        202
+    );
+
     f.store.close().await;
     f.admin.close().await;
 }
@@ -2303,6 +2319,7 @@ async fn at_gate_01_02_and_att_01_signed_checks_and_claim_bound_provenance() {
     let gates = brigalow_server::gates::Gates::new(&configs).unwrap();
     assert!(!gates.configured(f.orgs[1], &["pass".into()]));
     f.router = application(AppState {
+        rate_limit: Default::default(),
         gates,
         notifications: Default::default(),
         store: f.store.clone(),
@@ -2647,6 +2664,7 @@ async fn at_int_01_native_tools_through_remote_pkcs11() {
     }
     f.identity = Identity::new(config, Mode::Lab).unwrap();
     f.router = application(AppState {
+        rate_limit: Default::default(),
         store: f.store.clone(),
         mode: Mode::Lab,
         identity: Some(f.identity.clone()),
@@ -2820,6 +2838,103 @@ async fn at_ca_01_02_operator_tool_restart_and_publication() {
     assert!(
         result.status.success(),
         "CA operator CLI failed; diagnostics withheld"
+    );
+    f.store.close().await;
+    f.admin.close().await;
+}
+
+#[tokio::test]
+async fn at_ops_02_per_credential_rate_limits_and_audit() {
+    let mut f = fixture().await;
+    let org = f.orgs[0];
+    let first = role_session(&f, "rate-budget", vec![Role::OrgAdmin]).await;
+    let second = role_session(&f, "independent-budget", vec![Role::Auditor]).await;
+    f.router = application(AppState {
+        rate_limit: brigalow_server::rate_limit::RateLimit {
+            requests: 100,
+            period_seconds: 60,
+        },
+        store: f.store.clone(),
+        mode: Mode::Lab,
+        identity: Some(f.identity.clone()),
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+        notifications: Default::default(),
+        gates: Default::default(),
+    });
+    let path = format!("/v1/orgs/{org}/projects/{}", f.objects[0][0]);
+    let mut tasks = vec![];
+    let launch = std::time::Instant::now();
+    for _ in 0..200 {
+        let router = f.router.clone();
+        let path = path.clone();
+        let cookie = first.0.clone();
+        tasks.push(tokio::spawn(async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("cookie", cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+    assert!(
+        launch.elapsed() < std::time::Duration::from_secs(1),
+        "dispatch 200 requests in one second"
+    );
+    let mut accepted = 0;
+    let mut limited = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            StatusCode::OK => accepted += 1,
+            StatusCode::TOO_MANY_REQUESTS => limited += 1,
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert_eq!((accepted, limited), (100, 100));
+    assert_eq!(
+        f.router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("cookie", &second.0)
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let entries = f.store.tenant(org).audit_page(0, 1000).await.unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e.action == "credential.rate_limited")
+            .count(),
+        1
+    );
+    // New process/replica retains the exhausted database budget.
+    assert_eq!(
+        f.router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("cookie", &first.0)
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
     );
     f.store.close().await;
     f.admin.close().await;

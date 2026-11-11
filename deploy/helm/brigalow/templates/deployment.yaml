@@ -1,0 +1,80 @@
+{{- $image := required "image must be set to a reviewed immutable digest" .Values.image -}}
+{{- if not (regexMatch "^.+@sha256:[a-f0-9]{64}$" $image) -}}{{ fail "image must use a sha256 digest" }}{{- end -}}
+{{- $secret := required "existingSecret is required; never put secret values in Helm values" .Values.existingSecret -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: private-config
+          image: {{ $image | quote }}
+          # The reviewed image must include POSIX sh/cp/chmod. Copy projected
+          # symlinks into private regular files, as required by secret_file().
+          command: ["sh", "-ec", "umask 077; cp -L /input/* /output/; chmod 0600 /output/*"]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: secret-input
+              mountPath: /input
+              readOnly: true
+            - name: config
+              mountPath: /output
+      containers:
+        - name: server
+          image: {{ $image | quote }}
+          command: ["/usr/local/bin/brigalow-server"]
+          env:
+            - name: BRIGALOW_CONFIG
+              value: /run/brigalow/config.toml
+            - name: BRIGALOW_IDENTITY_FILE
+              value: /run/brigalow/identity.json
+            - name: BRIGALOW_BIND
+              value: "0.0.0.0:8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /run/brigalow
+              readOnly: true
+      volumes:
+        - name: config
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Mi
+        - name: secret-input
+          secret:
+            secretName: {{ $secret | quote }}
+            defaultMode: 0440

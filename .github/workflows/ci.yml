@@ -23,6 +23,8 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: GitHub OIDC wrapper tests
         run: python3 actions/sign/test_sign.py
+      - name: Release packaging tests
+        run: python3 scripts/test_release.py
       - name: Test
         run: cargo test --locked --workspace
       - name: Compose acceptance tests
@@ -43,3 +45,32 @@ jobs:
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
       - name: Scan repository history
         run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts="--all" .'
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Nightly for fuzz instrumentation only
+        run: rustup toolchain install nightly --profile minimal
+      - name: Install pinned fuzz driver
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Bounded parser fuzzing
+        run: python3 scripts/fuzz.py
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install checksum-pinned Helm
+        run: |
+          curl --fail --silent --show-error --location https://get.helm.sh/helm-v4.2.4-linux-amd64.tar.gz -o "$RUNNER_TEMP/helm.tar.gz"
+          echo 'c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3  '"$RUNNER_TEMP/helm.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/helm.tar.gz" -C "$RUNNER_TEMP" linux-amd64/helm
+          echo "$RUNNER_TEMP/linux-amd64" >> "$GITHUB_PATH"
+      - name: Render draft chart locally only
+        run: python3 scripts/test_helm.py

@@ -1,5 +1,6 @@
 //! Signing custody boundary. This API deliberately has no private-key export operation.
 pub mod attestation;
+pub mod audit;
 pub mod certificates;
 pub mod cms;
 pub mod pkcs11;

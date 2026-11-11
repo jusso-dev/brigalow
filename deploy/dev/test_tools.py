@@ -73,3 +73,17 @@ try:
 finally:
     subprocess.run(["gpgconf", "--kill", "all"], capture_output=True)
 print("AT-INT-01: OpenSSL, osslsigncode, jsign, cosign and GPG verified remote signatures")
+
+# Exercise the release workflow's actual local lab control-plane signature.
+import tomllib
+config = tomllib.loads(pathlib.Path(os.environ["BRIGALOW_PKCS11_CONFIG"]).read_text())
+release = pathlib.Path(os.environ["BRIGALOW_TEST_RELEASE_DIR"])
+run("/work/target/debug/brig", "sign", "--server", config["server"], "--org", config["org"],
+    "--project", config["project"], "--policy", config["policy"], "--ca-file", config["ca_file"],
+    "--format", "raw", "--output", str(release/"manifest.sig"), str(release/"manifest.json"))
+(release/"lab-public.pem").write_bytes(pathlib.Path("public.pem").read_bytes())
+run("python3", "/work/scripts/verify_release.py", str(release), "--public-key", str(release/"lab-public.pem"))
+manifest = (release/"manifest.json").read_bytes()
+(release/"manifest.json").write_bytes(manifest+b" ")
+run("python3", "/work/scripts/verify_release.py", str(release), "--public-key", str(release/"lab-public.pem"), ok=False)
+(release/"manifest.json").write_bytes(manifest)

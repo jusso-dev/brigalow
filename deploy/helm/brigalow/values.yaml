@@ -1,0 +1,13 @@
+# Draft only. Supply an immutable image digest built and reviewed by your operator.
+image: ""
+replicas: 1
+# Existing Secret containing config.toml, identity.json and referenced credentials.
+existingSecret: ""
+# HSM vendor library/configuration must be supplied in the reviewed image.
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi

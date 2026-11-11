@@ -73,7 +73,9 @@ services:
       dockerfile: deploy/dev/Tools.Dockerfile
     volumes:
       - ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}:/test-secrets:ro
+      - ${BRIGALOW_RELEASE_DIR:?run scripts/e2e.sh}:/release-artifacts
     environment:
+      BRIGALOW_TEST_RELEASE_DIR: /release-artifacts
       BRIGALOW_TEST_SECRETS: /test-secrets
       BRIGALOW_TEST_DB_HOST: postgres
       BRIGALOW_TEST_DB_PORT: "5432"

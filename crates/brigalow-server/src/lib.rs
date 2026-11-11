@@ -4,6 +4,7 @@ pub mod config;
 pub mod gates;
 pub mod keys;
 pub mod notifications;
+pub mod rate_limit;
 pub mod signing;
 pub mod web;
 use axum::{
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
+    pub rate_limit: rate_limit::RateLimit,
     pub store: Store,
     pub mode: Mode,
     pub identity: Option<Arc<auth::Identity>>,
@@ -29,6 +31,7 @@ pub struct AppState {
 }
 pub fn router(store: Store, mode: Mode) -> Router {
     application(AppState {
+        rate_limit: Default::default(),
         store,
         mode,
         identity: None,

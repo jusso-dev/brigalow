@@ -16,7 +16,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY deploy/dev ./deploy/dev
 COPY examples ./examples
-RUN cargo build --locked -p brig -p brigalow-pkcs11 -p brigalow-server --bin brigalow-ca --bin brig --lib \
+RUN cargo build --locked -p brig -p brigalow-pkcs11 -p brigalow-server --bin brigalow-ca --bin brigalow-audit --bin brig --lib \
     && cargo test --locked -p brigalow-server --test identity --features tool-tests --no-run \
     && find target/debug/deps -maxdepth 1 -type f -name 'identity-*' -executable -exec cp {} /tool-tests \;
 FROM tools-base
@@ -26,6 +26,8 @@ COPY --from=tools-build /tool-tests /tool-tests
 COPY --from=tools-build /work/target/debug/libbrigalow_pkcs11.so /work/target/debug/libbrigalow_pkcs11.so
 COPY --from=tools-build /work/target/debug/brig /work/target/debug/brig
 COPY --from=tools-build /work/target/debug/brigalow-ca /work/target/debug/brigalow-ca
+COPY --from=tools-build /work/target/debug/brigalow-audit /work/target/debug/brigalow-audit
 COPY deploy/dev ./deploy/dev
 COPY actions ./actions
+COPY scripts/verify_release.py ./scripts/verify_release.py
 ENTRYPOINT ["/tool-tests", "tool", "--nocapture", "--test-threads=1"]

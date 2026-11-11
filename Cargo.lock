@@ -253,6 +253,7 @@ name = "brig"
 version = "0.0.1"
 dependencies = [
  "brigalow-core",
+ "brigalow-crypto",
  "futures-util",
  "reqwest",
  "serde_json",

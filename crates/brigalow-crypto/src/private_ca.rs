@@ -9,7 +9,6 @@ use der::{
 use rsa::pkcs8::DecodePublicKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use signature::Verifier;
 use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 use x509_cert::{
@@ -306,32 +305,6 @@ pub fn csr_public_key(csr: &[u8]) -> Result<Vec<u8>> {
     }
     let message = csr.info.to_der().map_err(|_| Error::Certificate)?;
     let sig = csr.signature.as_bytes().ok_or(Error::Certificate)?;
-    let valid = match algorithm {
-        Algorithm::Rsa3072 => rsa::pkcs1v15::VerifyingKey::<Sha256>::new(
-            rsa::RsaPublicKey::from_public_key_der(&public).map_err(|_| Error::Certificate)?,
-        )
-        .verify(
-            &message,
-            &rsa::pkcs1v15::Signature::try_from(sig).map_err(|_| Error::Certificate)?,
-        )
-        .is_ok(),
-        Algorithm::P256 => p256::ecdsa::VerifyingKey::from_public_key_der(&public)
-            .map_err(|_| Error::Certificate)?
-            .verify(
-                &message,
-                &p256::ecdsa::Signature::from_der(sig).map_err(|_| Error::Certificate)?,
-            )
-            .is_ok(),
-        Algorithm::Ed25519 => ed25519_dalek::VerifyingKey::from_public_key_der(&public)
-            .map_err(|_| Error::Certificate)?
-            .verify_strict(
-                &message,
-                &ed25519_dalek::Signature::try_from(sig).map_err(|_| Error::Certificate)?,
-            )
-            .is_ok(),
-    };
-    if !valid {
-        return Err(Error::Certificate);
-    }
+    crate::audit::verify_message(algorithm, &public, &message, sig)?;
     Ok(public)
 }

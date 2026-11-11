@@ -50,7 +50,7 @@ cargo run -p brigalow-server
 
 Each organisation has its own sequence starting at 1, an all-zero genesis hash, and RFC 8785 canonical JSON hashed with SHA-256. Hash input is the entire entry except `entry_hash`. `at` is Unix milliseconds; details must use exact JSON integers within ±(2^53−1), strings for larger numbers and no floating-point values. Hashes use lowercase hexadecimal.
 
-The store serialises appends with a transaction advisory lock. Project creation and its audit entry commit together. Export through the tenant handle's bounded `audit_page` method, in sequence order, one JSON object per line. Verify with `brig audit verify <export.jsonl>`. CLI lines are limited to 1 MiB; empty or malformed exports fail. A hash chain alone does not authenticate its final head or detect suffix truncation/full replacement; signed checkpoints are still pending.
+The store serialises appends with a transaction advisory lock. Project creation and its audit entry commit together. Export through the tenant handle's bounded `audit_page` method, in sequence order, one JSON object per line. Verify with `brig audit verify <export.jsonl>`. CLI lines are limited to 1 MiB; empty or malformed exports fail. A hash chain alone does not authenticate its final head or detect suffix truncation/full replacement; use independently retained signed checkpoints for authenticated prefix verification (see [operations](operations.md)).
 
 ## Identity setup (Phase 1)
 
@@ -119,3 +119,8 @@ See [PKCS#11 recipes](integrations/pkcs11.md) and [the OIDC action](integrations
 ## Optional private CA (Phase 7)
 
 See [private CA operations](private-ca.md). `brigalow-ca` uses a separate restricted CA login and HSM issuer token; it does not run inside the HTTP service. The full Compose harness tests its real command across process restarts and verifies certificates/CRLs with OpenSSL. No root private key is loaded by Brigalow.
+
+
+## Operations checks (Phase 8)
+
+See [operations](operations.md) for credential budgets, signed checkpoints, recovery, fuzzing, the draft chart and lab release workflow. The full Compose harness includes scratch-only backup/restore and HSM reference recovery. `python3 scripts/test_release.py` and `python3 scripts/test_helm.py` check packaging and local chart rendering.

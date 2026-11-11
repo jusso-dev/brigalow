@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/brigalow-core", "crates/brigalow-server", "crates/brig"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/jusso-dev/brigalow"
+rust-version = "1.80"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

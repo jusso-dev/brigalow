@@ -9,7 +9,7 @@ use ::cms::{
 };
 use cmpv2::status::PkiStatus;
 use der::{
-    asn1::{Int, OctetString},
+    asn1::{Int, OctetString, Uint},
     Decode, Encode,
 };
 use futures_util::StreamExt;
@@ -18,8 +18,7 @@ use x509_cert::{ext::pkix::ExtendedKeyUsage, Certificate};
 use x509_tsp::{MessageImprint, TimeStampReq, TimeStampResp, TspVersion, TstInfo};
 
 pub fn request(signature: &[u8]) -> Result<TimeStampReq> {
-    let mut bytes = *uuid::Uuid::new_v4().as_bytes();
-    bytes[0] &= 0x7f;
+    let bytes = *uuid::Uuid::new_v4().as_bytes();
     Ok(TimeStampReq {
         version: TspVersion::V1,
         message_imprint: MessageImprint {
@@ -28,10 +27,37 @@ pub fn request(signature: &[u8]) -> Result<TimeStampReq> {
                 .map_err(|_| Error::Certificate)?,
         },
         req_policy: None,
-        nonce: Some(Int::new(&bytes).map_err(|_| Error::Certificate)?),
+        nonce: Some(nonce(&bytes)?),
         cert_req: true,
         extensions: None,
     })
+}
+// Uint removes redundant leading zeros; conversion adds a sign byte only when needed.
+// Int::new alone preserves redundant zeros, which a TSA normalises before echoing.
+fn nonce(bytes: &[u8]) -> Result<Int> {
+    Ok(Uint::new(bytes).map_err(|_| Error::Certificate)?.into())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nonce_is_canonical_positive_at_every_leading_byte_boundary() {
+        for first in 0..=255 {
+            for second in [0, 1, 127, 128, 255] {
+                let mut bytes = [0u8; 16];
+                bytes[0] = first;
+                bytes[1] = second;
+                bytes[15] = 1;
+                let n = nonce(&bytes).unwrap();
+                let encoded = n.to_der().unwrap();
+                assert_eq!(Int::from_der(&encoded).unwrap(), n);
+                assert_eq!(
+                    Uint::from_der(&encoded).unwrap(),
+                    Uint::new(&bytes).unwrap()
+                );
+            }
+        }
+    }
 }
 /// Only the configured signer is accepted. Token-supplied certificates cannot select trust.
 pub fn verify(

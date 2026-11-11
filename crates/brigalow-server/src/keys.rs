@@ -48,6 +48,7 @@ pub const CREATE: &str = "/v1/orgs/{org}/projects/{id}/keys";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Generate {
+    pub remote_key: Option<Uuid>,
     pub algorithm: Algorithm,
     pub purpose: Purpose,
     pub offline: bool,
@@ -86,19 +87,36 @@ pub async fn generate(
         return Err(WebError(StatusCode::UNPROCESSABLE_ENTITY));
     }
     let backend = service.backend.clone();
+    let remote = input.remote_key.is_some();
     let (key, public_key) = tokio::task::spawn_blocking(move || {
-        let key = backend.generate(input.algorithm, input.purpose)?;
+        let key = if let Some(id) = input.remote_key {
+            let key = backend.remote_key(id, org, project)?;
+            if key.algorithm != input.algorithm || key.purpose != input.purpose {
+                return Err(brigalow_crypto::Error::Unavailable);
+            }
+            key
+        } else {
+            backend.generate(input.algorithm, input.purpose)?
+        };
         match backend.public_key(&key) {
             Ok(public) => Ok((key, public)),
             Err(e) => {
-                let _ = backend.disable(&key);
+                if !remote {
+                    let _ = backend.disable(&key);
+                }
                 Err(e)
             }
         }
     })
     .await
     .map_err(|_| WebError(StatusCode::INTERNAL_SERVER_ERROR))?
-    .map_err(crypto)?;
+    .map_err(|error| {
+        if remote {
+            WebError(StatusCode::NOT_FOUND)
+        } else {
+            crypto(error)
+        }
+    })?;
     let record = KeyRecord {
         key,
         project,
@@ -115,8 +133,10 @@ pub async fn generate(
         chain: vec![],
         revision: 0,
     };
-    if let Err(e) = tenant.insert_key(&p.actor, &record).await {
-        let _ = service.backend.disable(&record.key);
+    if let Err(e) = tenant.insert_key(&p.actor, &record, remote).await {
+        if !remote {
+            let _ = service.backend.disable(&record.key);
+        }
         return Err(e.into());
     }
     Ok((StatusCode::CREATED, Json(record)))

@@ -2939,3 +2939,7 @@ async fn at_ops_02_per_credential_rate_limits_and_audit() {
     f.store.close().await;
     f.admin.close().await;
 }
+
+#[cfg(feature = "tool-tests")]
+#[path = "support/csc.rs"]
+mod csc;

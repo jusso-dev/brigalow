@@ -13,12 +13,20 @@ impl Tenant {
         tx.commit().await?;
         Ok(record.flatten().map(|v| v.0))
     }
-    pub async fn insert_key(&self, actor: &str, key: &KeyRecord) -> Result<(), Error> {
+    pub async fn insert_key(
+        &self,
+        actor: &str,
+        key: &KeyRecord,
+        remote: bool,
+    ) -> Result<(), Error> {
         let mut tx = self.begin().await?;
         self.lock_audit(&mut tx).await?;
-        sqlx::query("INSERT INTO brigalow.signing_keys (org_id,id,project_id,record,revision) VALUES ($1,$2,$3,$4,0)")
+        let inserted=sqlx::query("INSERT INTO brigalow.signing_keys (org_id,id,project_id,record,revision) VALUES ($1,$2,$3,$4,0) ON CONFLICT (org_id,id) DO NOTHING")
             .bind(self.org_id).bind(key.key.id).bind(key.project).bind(Json(key)).execute(&mut *tx).await?;
-        self.append(&mut tx,actor,"key.generated",&key.key.id.to_string(),serde_json::json!({"purpose":key.key.purpose,"algorithm":key.key.algorithm,"backend":key.backend,"trust":key.trust,"offline":key.offline})).await?;
+        if inserted.rows_affected() != 1 {
+            return Err(Error::Conflict);
+        }
+        self.append(&mut tx,actor,if remote { "key.remote_registered" } else { "key.generated" },&key.key.id.to_string(),serde_json::json!({"purpose":key.key.purpose,"algorithm":key.key.algorithm,"backend":key.backend,"trust":key.trust,"offline":key.offline})).await?;
         tx.commit().await?;
         Ok(())
     }

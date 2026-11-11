@@ -2,24 +2,24 @@
 
 Open-source, self-hosted signing control plane. Build systems send a digest; Brigalow checks who is asking and whether policy allows it, has a key in an HSM sign it, and keeps a tamper-evident record.
 
-> **Status: Phases 0–3 implemented; see phase issues for CI evidence.** Config, health checks, tenant-scoped persistence and offline audit-chain verification are available. OIDC identity, scoped tokens and initial administration pages are available. PKCS#11/lab backends and custodian key/certificate APIs are available. Digest signing, detached CMS and verified RFC 3161 timestamps are available. Approvals, release windows and gates remain pending; nothing here is ready to sign real software. Don't deploy it to production. Work is tracked in [issues](https://github.com/jusso-dev/brigalow/issues) and [ROADMAP.md](ROADMAP.md).
+> **Status: implementation spans Phases 0–9; phase issues track local and hosted acceptance gates.** Implemented: OIDC/RBAC, tenant isolation, HSM/lab key custody, digest signing and CMS/timestamps, approvals, release windows, gates, provenance, native-tool integrations, optional private CA, rate limits, signed audit checkpoints and recovery drills. Phase 9 adds a local CSC mock only. See [phase issues](https://github.com/jusso-dev/brigalow/issues) for the authoritative completion evidence. This remains development software; no production deployment or real CA integration has been performed.
 
 ## Why
 
 Signing keys still end up on build agents and laptops. Commercial signing platforms fix that, but the only open-source signing server with a long history (SignServer Community Edition) dropped HSM support in 7.7.1 and is labelled non-production. Brigalow aims to be a production-intended, HSM-first option you can run yourself, including air-gapped.
 
-## What it will do
+## Capabilities
 
-- Keep private keys in an HSM (PKCS#11) or KMS. No export.
+- Keep private keys in an HSM through PKCS#11. Software keys are lab-only; cloud KMS backends remain future work. No export.
 - Accept digests only; artifacts stay on the build machine.
 - Authenticate humans with OIDC and CI jobs with OIDC workload tokens, matched against rules (repo, branch, workflow, environment).
 - Enforce signing policies with a test or release purpose, async k-of-n approvals where one deny rejects, release windows with signature caps, and fail-closed pre-sign gates.
-- Produce raw signatures and detached CMS with RFC 3161 timestamps; later a PKCS#11 module so existing tools (osslsigncode, jsign, cosign, GPG) work unchanged.
+- Produce raw signatures and detached CMS with RFC 3161 timestamps; a PKCS#11 module so existing tools (osslsigncode, jsign, cosign, GPG) work unchanged.
 - Record every step in a hash-chained audit log you can verify offline.
 
 ## What it won't do
 
-Brigalow is not a certificate authority and can't make a signature publicly trusted. Public trust (Windows SmartScreen, macOS Gatekeeper and similar) needs a certificate from a public CA after identity validation, usually with a fee and certified key hardware. Brigalow can put policy, approvals and audit in front of such a key, but the trust comes from the CA. See [docs/product/scope.md](docs/product/scope.md).
+Brigalow's optional private CA supports self-hosted trust. Brigalow cannot act as a public CA or make a signature publicly trusted. Public trust (Windows SmartScreen, macOS Gatekeeper and similar) needs a certificate from a public CA after identity validation, usually with a fee and certified key hardware. Brigalow can put policy, approvals and audit in front of such a key, but the trust comes from the CA. See [docs/product/scope.md](docs/product/scope.md).
 
 ## Docs
 
@@ -53,7 +53,9 @@ Verify a single-organisation audit export offline:
 cargo run -p brig -- audit verify export.jsonl
 ```
 
-This checks chain integrity. Signed checkpoints and protection against whole-chain replacement or suffix truncation are not implemented yet.
+This checks chain integrity. Add `--checkpoint checkpoint.json --public-key trusted.der` to authenticate an exact exported prefix against an independently pinned audit key. Retain the latest signed head outside the signing host to detect rollback. See [operations](docs/operations.md).
+
+Additional guides: [private CA](docs/private-ca.md), [native integrations](docs/integrations/pkcs11.md), [CSC mock](docs/integrations/csc-mock.md), [HSM CA attestation](docs/integrations/hsm-ca-attestation.md), [Azure evaluation](docs/integrations/azure-evaluation.md).
 
 ## Licence
 

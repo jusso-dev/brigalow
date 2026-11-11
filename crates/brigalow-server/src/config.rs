@@ -31,6 +31,7 @@ pub enum Backend {
     Disabled,
     Software,
     Pkcs11,
+    CscMock,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +67,60 @@ impl TsaConfig {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CscMockConfig {
+    pub url: String,
+    pub tls_ca_file: PathBuf,
+    pub access_token_file: PathBuf,
+    pub bindings: Vec<CscBindingConfig>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CscBindingConfig {
+    pub id: uuid::Uuid,
+    pub org: uuid::Uuid,
+    pub project: uuid::Uuid,
+    pub credential_id: String,
+    pub certificate_file: PathBuf,
+}
+impl CscMockConfig {
+    pub fn backend(&self) -> Result<brigalow_crypto::csc_mock::CscMock, ConfigError> {
+        let read = |path: &Path| -> Result<Vec<u8>, ConfigError> {
+            let file = std::fs::File::open(path)
+                .map_err(|_| ConfigError("cannot read CSC certificate"))?;
+            let mut bytes = Vec::new();
+            file.take(65537)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ConfigError("cannot read CSC certificate"))?;
+            if bytes.len() > 65536 {
+                return Err(ConfigError("CSC certificate too large"));
+            }
+            Ok(bytes)
+        };
+        let bindings = self
+            .bindings
+            .iter()
+            .map(|b| {
+                Ok(brigalow_crypto::csc_mock::Binding {
+                    id: b.id,
+                    org: b.org,
+                    project: b.project,
+                    credential_id: b.credential_id.clone(),
+                    certificate: read(&b.certificate_file)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ConfigError>>()?;
+        brigalow_crypto::csc_mock::CscMock::new(
+            &self.url,
+            &read(&self.tls_ca_file)?,
+            secret_file(&self.access_token_file)?,
+            bindings,
+        )
+        .map_err(|_| ConfigError("CSC mock startup failed; no fallback allowed"))
+    }
+}
+
 pub struct Config {
     pub rate_limit: crate::rate_limit::RateLimit,
     pub mode: Mode,
@@ -82,6 +137,7 @@ pub struct Config {
     pub hsm_token: Option<String>,
     pub trust_anchors: Vec<AnchorConfig>,
     pub tsa: Option<TsaConfig>,
+    pub csc_mock: Option<CscMockConfig>,
     pub notifications: Vec<crate::notifications::Config>,
     pub gates: Vec<crate::gates::Config>,
     hsm_pin: Option<Secret>,
@@ -120,6 +176,7 @@ struct FileConfig {
     hsm_token: Option<String>,
     trust_anchors: Option<Vec<AnchorConfig>>,
     tsa: Option<TsaConfig>,
+    csc_mock: Option<CscMockConfig>,
     notifications: Option<Vec<crate::notifications::Config>>,
     gates: Option<Vec<crate::gates::Config>>,
 }
@@ -231,12 +288,16 @@ impl Config {
         let backend = match env("BRIGALOW_BACKEND")?.as_deref() {
             Some("software") => Backend::Software,
             Some("pkcs11") => Backend::Pkcs11,
+            Some("csc_mock") => Backend::CscMock,
             Some("disabled") => Backend::Disabled,
             None => file.backend.unwrap_or_default(),
             _ => return Err(ConfigError("invalid key backend")),
         };
         if backend == Backend::Software && mode != Mode::Lab {
             return Err(ConfigError("software backend requires lab mode"));
+        }
+        if (backend == Backend::CscMock || file.csc_mock.is_some()) && mode != Mode::Lab {
+            return Err(ConfigError("CSC mock backend requires lab mode"));
         }
         let rate_limit = file.rate_limit.unwrap_or_default();
         if !rate_limit.valid() {
@@ -254,6 +315,7 @@ impl Config {
             hsm_token: env("BRIGALOW_HSM_TOKEN")?.or(file.hsm_token),
             trust_anchors: file.trust_anchors.unwrap_or_default(),
             tsa: file.tsa,
+            csc_mock: file.csc_mock,
             notifications: file.notifications.unwrap_or_default(),
             gates: file.gates.unwrap_or_default(),
             mode,
@@ -298,6 +360,17 @@ impl Config {
         use brigalow_crypto::{pkcs11::Hsm, software::Software};
         let backend: std::sync::Arc<dyn brigalow_crypto::KeyBackend> = match self.backend {
             Backend::Disabled => return Ok(None),
+            Backend::CscMock => {
+                if self.mode != Mode::Lab {
+                    return Err(ConfigError("CSC mock backend requires lab mode"));
+                }
+                std::sync::Arc::new(
+                    self.csc_mock
+                        .as_ref()
+                        .ok_or(ConfigError("CSC mock configuration required"))?
+                        .backend()?,
+                )
+            }
             Backend::Software => std::sync::Arc::new(
                 Software::new(self.mode == Mode::Lab)
                     .map_err(|_| ConfigError("software backend requires lab mode"))?,
@@ -390,6 +463,18 @@ mod tests {
                 ("BRIGALOW_DB_PASSWORD", &secret),
                 ("BRIGALOW_HSM_PIN", &secret),
             ],
+        )
+        .unwrap();
+        assert!(config.key_backend().is_err());
+        assert!(
+            load("backend='csc_mock'", &[("BRIGALOW_DB_PASSWORD", &secret)])
+                .unwrap_err()
+                .to_string()
+                .contains("requires lab mode")
+        );
+        let config = load(
+            "mode='lab'\nbackend='csc_mock'",
+            &[("BRIGALOW_DB_PASSWORD", &secret)],
         )
         .unwrap();
         assert!(config.key_backend().is_err());

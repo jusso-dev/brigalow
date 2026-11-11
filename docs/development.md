@@ -124,3 +124,7 @@ See [private CA operations](private-ca.md). `brigalow-ca` uses a separate restri
 ## Operations checks (Phase 8)
 
 See [operations](operations.md) for credential budgets, signed checkpoints, recovery, fuzzing, the draft chart and lab release workflow. The full Compose harness includes scratch-only backup/restore and HSM reference recovery. `python3 scripts/test_release.py` and `python3 scripts/test_helm.py` check packaging and local chart rendering.
+
+## Remote signing mock
+
+`backend="csc_mock"` is available only in lab mode against literal-loopback HTTPS. See [CSC configuration and protocol limits](integrations/csc-mock.md), [outside-CA HSM attestation planning](integrations/hsm-ca-attestation.md), and [Azure evaluation](integrations/azure-evaluation.md). The mock cannot enrol with or contact a real CA.

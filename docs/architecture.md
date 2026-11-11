@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Phase 0 foundations implemented: config, health endpoint, tenant store, audit chain and offline verifier. Phase 1 adds OIDC, scoped tokens, sessions, RBAC and initial escaped administration pages. Phase 2 adds key backends, custodian lifecycle APIs, CSRs and validated certificate imports. Phase 3 adds immutable signing policies, durable signing intents, digest-only CLI requests, detached CMS and verified RFC 3161 timestamps. Phase 4 adds individual approvals, expiry, atomic release-window caps and signed notification webhooks. Phase 5 adds fail-closed signed gates and claim-bound DSSE provenance. Phase 6 adds a digest-only client PKCS#11 module and GitHub OIDC action. Phase 7 adds an operator-only private CA command with separate HSM/DB custody and a durable day-scoped issuance/revocation ledger. Phase 8 adds shared credential budgets, HSM-signed audit checkpoints, parser fuzzing, restore drills and lab-signed release artifacts.
+Status: Phase 0 foundations implemented: config, health endpoint, tenant store, audit chain and offline verifier. Phase 1 adds OIDC, scoped tokens, sessions, RBAC and initial escaped administration pages. Phase 2 adds key backends, custodian lifecycle APIs, CSRs and validated certificate imports. Phase 3 adds immutable signing policies, durable signing intents, digest-only CLI requests, detached CMS and verified RFC 3161 timestamps. Phase 4 adds individual approvals, expiry, atomic release-window caps and signed notification webhooks. Phase 5 adds fail-closed signed gates and claim-bound DSSE provenance. Phase 6 adds a digest-only client PKCS#11 module and GitHub OIDC action. Phase 7 adds an operator-only private CA command with separate HSM/DB custody and a durable day-scoped issuance/revocation ledger. Phase 8 adds shared credential budgets, HSM-signed audit checkpoints, parser fuzzing, restore drills and lab-signed release artifacts. Phase 9 adds a lab-only, loopback HTTPS CSC mock backend with scoped credential references and verified digest signatures.
 
 ## Components
 
@@ -18,7 +18,7 @@ Status: Phase 0 foundations implemented: config, health endpoint, tenant store, 
              sqlx (Postgres)        KeyBackend trait
                     |              /       |        \
                Postgres      PKCS#11    lab-soft    (later) cloud KMS,
-                             (HSM /     (dev only)  remote CA API
+                             (HSM /     (dev only)  remote CA API (CSC mock only)
                              SoftHSM2)
                     |
            external RFC 3161 TSA (configured URL)

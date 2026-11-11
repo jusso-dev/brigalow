@@ -12,8 +12,12 @@ async fn run() -> Result<(), &'static str> {
         tracing::error!(%error, "configuration rejected");
         "invalid configuration"
     })?;
-    let keys = config
-        .key_backend()
+    let config = std::sync::Arc::new(config);
+    let backend_config = config.clone();
+    let backend = tokio::task::spawn_blocking(move || backend_config.key_backend())
+        .await
+        .map_err(|_| "key backend startup failed")?;
+    let keys = backend
         .map_err(|e| {
             tracing::error!(error=%e,"key backend startup rejected");
             "key backend startup failed"

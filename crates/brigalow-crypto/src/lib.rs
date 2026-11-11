@@ -3,6 +3,7 @@ pub mod attestation;
 pub mod audit;
 pub mod certificates;
 pub mod cms;
+pub mod csc_mock;
 pub mod pkcs11;
 pub mod private_ca;
 pub mod software;
@@ -30,6 +31,10 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 pub trait KeyBackend: Send + Sync {
+    /// Explicit pre-provisioned remote reference, scoped by operator configuration.
+    fn remote_key(&self, _id: Uuid, _org: Uuid, _project: Uuid) -> Result<Key> {
+        Err(Error::Unavailable)
+    }
     fn generate(&self, algorithm: Algorithm, purpose: Purpose) -> Result<Key>;
     fn public_key(&self, key: &Key) -> Result<Vec<u8>>;
     fn sign_digest(&self, key: &Key, algorithm: DigestAlgorithm, digest: &[u8]) -> Result<Vec<u8>>;

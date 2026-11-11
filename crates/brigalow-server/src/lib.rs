@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod keys;
 pub mod web;
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
@@ -17,12 +18,14 @@ pub struct AppState {
     pub store: Store,
     pub mode: Mode,
     pub identity: Option<Arc<auth::Identity>>,
+    pub keys: Option<keys::KeyService>,
 }
 pub fn router(store: Store, mode: Mode) -> Router {
     application(AppState {
         store,
         mode,
         identity: None,
+        keys: None,
     })
 }
 pub fn application(state: AppState) -> Router {
@@ -35,6 +38,20 @@ pub fn application(state: AppState) -> Router {
                       Path((org, id)): Path<(Uuid, Uuid)>,
                       headers: HeaderMap| async move {
                     web::object(state, headers, org, id, kind).await
+                },
+            ),
+        );
+    }
+    router = router.route(keys::CREATE, post(keys::generate));
+    for (name, operation) in keys::MUTATIONS {
+        router = router.route(
+            &format!("/v1/orgs/{{org}}/keys/{{id}}/{name}"),
+            post(
+                move |State(state): State<AppState>,
+                      Path((org, id)): Path<(Uuid, Uuid)>,
+                      headers: HeaderMap,
+                      Json(input): Json<keys::Input>| async move {
+                    keys::mutate(state, org, id, headers, input, operation).await
                 },
             ),
         );

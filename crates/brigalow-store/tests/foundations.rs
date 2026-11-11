@@ -68,7 +68,7 @@ async fn at_ten_01_store_isolation_and_atomic_audit() {
         let key = Uuid::new_v4();
         let policy = Uuid::new_v4();
         let request = Uuid::new_v4();
-        sqlx::query("INSERT INTO brigalow.signing_keys VALUES ($1,$2,$3)")
+        sqlx::query("INSERT INTO brigalow.signing_keys (org_id,id,project_id) VALUES ($1,$2,$3)")
             .bind(org)
             .bind(key)
             .bind(project)
@@ -146,15 +146,15 @@ async fn at_ten_01_store_isolation_and_atomic_audit() {
     );
     tx.rollback().await.unwrap();
     // Composite foreign keys prevent cross-tenant references, even for owner writes.
-    assert!(
-        sqlx::query("INSERT INTO brigalow.signing_keys VALUES ($1,$2,$3)")
-            .bind(a)
-            .bind(Uuid::new_v4())
-            .bind(fixture[1][0])
-            .execute(&admin)
-            .await
-            .is_err()
-    );
+    assert!(sqlx::query(
+        "INSERT INTO brigalow.signing_keys (org_id,id,project_id) VALUES ($1,$2,$3)"
+    )
+    .bind(a)
+    .bind(Uuid::new_v4())
+    .bind(fixture[1][0])
+    .execute(&admin)
+    .await
+    .is_err());
     let grants: Vec<String> = sqlx::query_scalar("SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee='brigalow_app' AND table_schema='brigalow' AND table_name='audit_entries' ORDER BY privilege_type").fetch_all(&admin).await.unwrap();
     assert_eq!(grants, vec!["INSERT", "SELECT"]);
     for sql in [

@@ -9,6 +9,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub mod identity;
+pub mod keys;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 

@@ -209,6 +209,14 @@ pub async fn object(
     if !principal.allows(Action::Read) {
         return Err(WebError(StatusCode::FORBIDDEN));
     }
+    if matches!(kind, RouteKind::Key) {
+        if let Some(record) = tenant.key(id).await? {
+            return Ok(Json(
+                serde_json::to_value(record)
+                    .map_err(|_| WebError(StatusCode::INTERNAL_SERVER_ERROR))?,
+            ));
+        }
+    }
     let name = if matches!(kind, RouteKind::Project) {
         tenant.project_name(id).await?
     } else {

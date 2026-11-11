@@ -50,3 +50,17 @@ fn at_ops_01_startup_error_redacts_environment_secrets_and_config() {
         assert!(!err.contains(value));
     }
 }
+
+#[test]
+fn at_key_01_production_software_refused_before_database_connection() {
+    let output = Command::new(env!("CARGO_BIN_EXE_brigalow-server"))
+        .env_clear()
+        .env("BRIGALOW_MODE", "production")
+        .env("BRIGALOW_BACKEND", "software")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("software backend requires lab mode"));
+    assert!(!error.contains("database startup failed"));
+}

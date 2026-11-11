@@ -12,6 +12,45 @@ async fn run() -> Result<(), &'static str> {
         tracing::error!(%error, "configuration rejected");
         "invalid configuration"
     })?;
+    let keys = config
+        .key_backend()
+        .map_err(|e| {
+            tracing::error!(error=%e,"key backend startup rejected");
+            "key backend startup failed"
+        })?
+        .map(|backend| -> Result<_, &'static str> {
+            let anchors = config
+                .trust_anchors
+                .iter()
+                .map(|path| {
+                    if path.name.is_empty()
+                        || path.name.len() > 200
+                        || !matches!(
+                            path.tier,
+                            brigalow_core::TrustTier::Private
+                                | brigalow_core::TrustTier::ExternalCa
+                        )
+                    {
+                        return Err("invalid trust anchor configuration");
+                    }
+                    let der = std::fs::read(&path.file).map_err(|_| "cannot read trust anchor")?;
+                    if der.len() > 65536 {
+                        return Err("trust anchor too large");
+                    }
+                    Ok(brigalow_server::keys::Anchor {
+                        name: path.name.clone(),
+                        tier: path.tier,
+                        der,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(brigalow_server::keys::KeyService {
+                backend,
+                id: config.backend_id.clone(),
+                anchors,
+            })
+        })
+        .transpose()?;
     let store = Store::connect(config.database_options()).await.map_err(|_| {
         tracing::error!(?config, "database startup failed; check availability, TLS, migrations and restricted runtime role");
         "database startup failed"
@@ -45,6 +84,7 @@ async fn run() -> Result<(), &'static str> {
             store: store.clone(),
             mode: config.mode,
             identity,
+            keys,
         }),
     )
     .with_graceful_shutdown(shutdown())

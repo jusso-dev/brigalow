@@ -75,7 +75,7 @@ async fn fixture() -> Fixture {
         for id in objects[i].iter_mut().skip(1) {
             *id = Uuid::new_v4();
         }
-        sqlx::query("INSERT INTO brigalow.signing_keys VALUES ($1,$2,$3)")
+        sqlx::query("INSERT INTO brigalow.signing_keys (org_id,id,project_id) VALUES ($1,$2,$3)")
             .bind(org)
             .bind(objects[i][1])
             .bind(objects[i][0])
@@ -152,6 +152,11 @@ async fn fixture() -> Fixture {
         .build()
         .unwrap();
     let router = application(AppState {
+        keys: Some(brigalow_server::keys::KeyService {
+            backend: Arc::new(brigalow_crypto::software::Software::new(true).unwrap()),
+            id: "test".into(),
+            anchors: vec![],
+        }),
         store: store.clone(),
         mode: Mode::Lab,
         identity: Some(identity.clone()),
@@ -654,7 +659,7 @@ async fn at_ten_01_routes_at_web_01_csrf_xss_and_at_id_03_replay() {
         403
     );
     let other_key = Uuid::new_v4();
-    sqlx::query("INSERT INTO brigalow.signing_keys VALUES ($1,$2,$3)")
+    sqlx::query("INSERT INTO brigalow.signing_keys (org_id,id,project_id) VALUES ($1,$2,$3)")
         .bind(a)
         .bind(other_key)
         .bind(f.objects[0][0])
@@ -755,4 +760,233 @@ async fn at_ten_01_routes_at_web_01_csrf_xss_and_at_id_03_replay() {
         )
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn key_lifecycle_custody_tenancy_and_csrf() {
+    use brigalow_core::{keys::KeyRecord, rbac::Principal};
+    use brigalow_server::keys::{CREATE, MUTATIONS};
+    let f = fixture().await;
+    let org = f.orgs[0];
+    let project = f.objects[0][0];
+    let secret = auth::random_secret();
+    let csrf = auth::random_secret();
+    let p = Principal {
+        org_id: org,
+        actor: "custodian".into(),
+        roles: vec![Role::KeyCustodian],
+        scope: None,
+        human: true,
+    };
+    f.store
+        .tenant(org)
+        .issue_credential(
+            &auth::hash(&secret),
+            &p,
+            Some(&csrf),
+            auth::now() + 300,
+            "fixture",
+        )
+        .await
+        .unwrap();
+    let cookie = format!("__Host-brigalow={org}.{secret}");
+    let path = CREATE
+        .replace("{org}", &org.to_string())
+        .replace("{id}", &project.to_string());
+    let body = json!({"algorithm":"p256","purpose":"test","offline":true});
+    assert_eq!(
+        request(&f, "POST", &path, Some(&cookie), None, None, body.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let other_path = CREATE
+        .replace("{org}", &org.to_string())
+        .replace("{id}", &f.objects[1][0].to_string());
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &other_path,
+            Some(&cookie),
+            None,
+            Some(&csrf),
+            body.clone()
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, _, response) = request(
+        &f,
+        "POST",
+        &path,
+        Some(&cookie),
+        None,
+        Some(&csrf),
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let key: KeyRecord = serde_json::from_str(&response).unwrap();
+    let id = key.key.id;
+    assert_eq!(key.trust, brigalow_core::TrustTier::Lab);
+    assert!(key.offline);
+    let response: Value = serde_json::from_str(&response).unwrap();
+    let fields: std::collections::BTreeSet<_> = response
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        fields,
+        std::collections::BTreeSet::from([
+            "key",
+            "project",
+            "backend",
+            "state",
+            "offline",
+            "trust",
+            "public_key",
+            "chain",
+            "revision",
+            "anchor"
+        ])
+    );
+    // Every registered lifecycle route rejects cross-tenant IDs and missing CSRF.
+    for (name, _) in MUTATIONS {
+        let route = format!("/v1/orgs/{org}/keys/{}/{name}", f.objects[1][1]);
+        assert_eq!(
+            request(
+                &f,
+                "POST",
+                &route,
+                Some(&cookie),
+                None,
+                Some(&csrf),
+                json!({})
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        let route = format!("/v1/orgs/{org}/keys/{id}/{name}");
+        assert_eq!(
+            request(&f, "POST", &route, Some(&cookie), None, None, json!({}))
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert!(!name.contains("export"));
+    }
+    let (admin, admin_csrf) = login(&f, org).await;
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &path,
+            Some(&admin),
+            None,
+            Some(&admin_csrf),
+            body
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    for (algorithm, purpose) in [("rsa2048", "test"), ("p256", "release")] {
+        assert_eq!(
+            request(
+                &f,
+                "POST",
+                &path,
+                Some(&cookie),
+                None,
+                Some(&csrf),
+                json!({"algorithm":algorithm,"purpose":purpose,"offline":false})
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let keypath = format!("/v1/orgs/{org}/keys/{id}");
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &format!("{keypath}/csr"),
+            Some(&cookie),
+            None,
+            Some(&csrf),
+            json!({"subject":"CN=Test"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &format!("{keypath}/certificate"),
+            Some(&cookie),
+            None,
+            Some(&csrf),
+            json!({"chain":[[0,1,2]]})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for action in ["activate", "disable", "retire"] {
+        assert_eq!(
+            request(
+                &f,
+                "POST",
+                &format!("{keypath}/{action}"),
+                Some(&cookie),
+                None,
+                Some(&csrf),
+                json!({})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &format!("{keypath}/activate"),
+            Some(&cookie),
+            None,
+            Some(&csrf),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let events = f.store.tenant(org).audit_page(0, 1000).await.unwrap();
+    for action in [
+        "key.generated",
+        "key.csr",
+        "key.activated",
+        "key.disabled",
+        "key.retired",
+    ] {
+        assert!(events.iter().any(|e| e.action == action));
+    }
+    // A stale writer cannot overwrite a revocation.
+    assert!(f
+        .store
+        .tenant(org)
+        .update_key("stale", "key.activated", &key)
+        .await
+        .is_err());
+    f.store.close().await;
+    f.admin.close().await;
 }

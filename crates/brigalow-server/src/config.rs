@@ -24,6 +24,23 @@ impl fmt::Debug for Secret {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    #[default]
+    Disabled,
+    Software,
+    Pkcs11,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorConfig {
+    pub name: String,
+    pub tier: brigalow_core::TrustTier,
+    pub file: PathBuf,
+}
+
 pub struct Config {
     pub mode: Mode,
     pub bind: SocketAddr,
@@ -33,7 +50,11 @@ pub struct Config {
     db_user: String,
     db_ca_file: Option<PathBuf>,
     db_password: Secret,
-    // Reserved for the Phase 2 backend; never logged or handed to a software fallback.
+    pub backend: Backend,
+    pub backend_id: String,
+    pub hsm_module: Option<PathBuf>,
+    pub hsm_token: Option<String>,
+    pub trust_anchors: Vec<AnchorConfig>,
     hsm_pin: Option<Secret>,
 }
 impl fmt::Debug for Config {
@@ -63,6 +84,11 @@ struct FileConfig {
     db_ca_file: Option<PathBuf>,
     db_password_file: Option<PathBuf>,
     hsm_pin_file: Option<PathBuf>,
+    backend: Option<Backend>,
+    backend_id: Option<String>,
+    hsm_module: Option<PathBuf>,
+    hsm_token: Option<String>,
+    trust_anchors: Option<Vec<AnchorConfig>>,
 }
 
 fn secret_file(path: &Path) -> Result<String, ConfigError> {
@@ -169,7 +195,26 @@ impl Config {
                 })
                 .transpose()
         };
+        let backend = match env("BRIGALOW_BACKEND")?.as_deref() {
+            Some("software") => Backend::Software,
+            Some("pkcs11") => Backend::Pkcs11,
+            Some("disabled") => Backend::Disabled,
+            None => file.backend.unwrap_or_default(),
+            _ => return Err(ConfigError("invalid key backend")),
+        };
+        if backend == Backend::Software && mode != Mode::Lab {
+            return Err(ConfigError("software backend requires lab mode"));
+        }
         Ok(Self {
+            backend,
+            backend_id: env("BRIGALOW_BACKEND_ID")?
+                .or(file.backend_id)
+                .unwrap_or_else(|| "default".into()),
+            hsm_module: env("BRIGALOW_HSM_MODULE")?
+                .map(PathBuf::from)
+                .or(file.hsm_module),
+            hsm_token: env("BRIGALOW_HSM_TOKEN")?.or(file.hsm_token),
+            trust_anchors: file.trust_anchors.unwrap_or_default(),
             mode,
             bind,
             db_host: env("BRIGALOW_DB_HOST")?
@@ -204,6 +249,36 @@ impl Config {
                 file.hsm_pin_file,
             )?,
         })
+    }
+
+    pub fn key_backend(
+        &self,
+    ) -> Result<Option<std::sync::Arc<dyn brigalow_crypto::KeyBackend>>, ConfigError> {
+        use brigalow_crypto::{pkcs11::Hsm, software::Software};
+        let backend: std::sync::Arc<dyn brigalow_crypto::KeyBackend> = match self.backend {
+            Backend::Disabled => return Ok(None),
+            Backend::Software => std::sync::Arc::new(
+                Software::new(self.mode == Mode::Lab)
+                    .map_err(|_| ConfigError("software backend requires lab mode"))?,
+            ),
+            Backend::Pkcs11 => std::sync::Arc::new(
+                Hsm::open(
+                    self.hsm_module
+                        .as_deref()
+                        .ok_or(ConfigError("HSM module required"))?,
+                    self.hsm_token
+                        .as_deref()
+                        .ok_or(ConfigError("HSM token label required"))?,
+                    self.hsm_pin
+                        .as_ref()
+                        .ok_or(ConfigError("HSM PIN required"))?
+                        .0
+                        .to_string(),
+                )
+                .map_err(|_| ConfigError("HSM startup failed; no fallback allowed"))?,
+            ),
+        };
+        Ok(Some(backend))
     }
 
     pub fn database_options(&self) -> PgConnectOptions {
@@ -254,6 +329,29 @@ mod tests {
         assert!(load("", &[("BRIGALOW_DB_PASSWORD", "")]).is_err());
         let error = load(&format!("db_password='{secret}'"), &[]).unwrap_err();
         assert!(!format!("{error:?} {error}").contains(&secret));
+    }
+    #[test]
+    fn at_key_01_startup_guard_and_no_fallback() {
+        let secret = uuid::Uuid::new_v4().to_string();
+        let error = load("backend='software'", &[("BRIGALOW_DB_PASSWORD", &secret)]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("software backend requires lab mode"));
+        let config = load(
+            "mode='lab'\nbackend='software'",
+            &[("BRIGALOW_DB_PASSWORD", &secret)],
+        )
+        .unwrap();
+        assert!(config.key_backend().unwrap().unwrap().is_lab());
+        let config = load(
+            "mode='lab'\nbackend='pkcs11'\nhsm_module='/nonexistent/module'\nhsm_token='absent'",
+            &[
+                ("BRIGALOW_DB_PASSWORD", &secret),
+                ("BRIGALOW_HSM_PIN", &secret),
+            ],
+        )
+        .unwrap();
+        assert!(config.key_backend().is_err());
     }
     #[test]
     #[cfg(unix)]

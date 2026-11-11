@@ -1,7 +1,10 @@
 #![cfg(feature = "integration")]
 use brigalow_core::audit::Verifier;
 use brigalow_store::{ObjectKind, Store, MIGRATOR};
-use sqlx::{postgres::PgConnectOptions, ConnectOptions, PgPool};
+use sqlx::{
+    postgres::{PgConnectOptions, PgSslMode},
+    ConnectOptions, PgPool,
+};
 use uuid::Uuid;
 
 fn options(user: &str, variable: &str) -> PgConnectOptions {
@@ -15,6 +18,8 @@ fn options(user: &str, variable: &str) -> PgConnectOptions {
                 .parse()
                 .unwrap(),
         )
+        .ssl_mode(PgSslMode::VerifyFull)
+        .ssl_root_cert(std::env::var("BRIGALOW_TEST_DB_CA_FILE").unwrap())
         .database("brigalow")
         .username(user)
         .password(&secret)
@@ -210,6 +215,43 @@ async fn at_ten_01_store_isolation_and_atomic_audit() {
         .create_project("test", "missing")
         .await
         .is_err());
+    // AT-AUD-01: persist and export a full chain through the real tenant store.
+    let audit_org = Uuid::new_v4();
+    sqlx::query("INSERT INTO brigalow.organisations VALUES ($1,'audit-export')")
+        .bind(audit_org)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let audit = store.tenant(audit_org);
+    for i in 0..1000 {
+        audit
+            .record(
+                "test",
+                "recorded",
+                &i.to_string(),
+                serde_json::json!({"name":"original"}),
+            )
+            .await
+            .unwrap();
+    }
+    let path = std::path::PathBuf::from(std::env::var("BRIGALOW_TEST_SECRETS").unwrap())
+        .join("audit.jsonl");
+    let mut export = std::fs::File::create(path).unwrap();
+    let mut after = 0;
+    let mut verifier = Verifier::default();
+    loop {
+        let page = audit.audit_page(after, 137).await.unwrap();
+        if page.is_empty() {
+            break;
+        }
+        for entry in page {
+            use std::io::Write;
+            verifier.push(&entry).unwrap();
+            after = entry.seq as i64;
+            writeln!(export, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+    }
+    assert_eq!(verifier.finish().unwrap(), 1000);
     store.close().await;
     app.close().await;
     admin.close().await;

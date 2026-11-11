@@ -2,7 +2,7 @@
 
 Open-source, self-hosted signing control plane. Build systems send a digest; Brigalow checks who is asking and whether policy allows it, has a key in an HSM sign it, and keeps a tamper-evident record.
 
-> **Status: design and scaffold only.** Nothing here is ready to sign real software. Don't deploy it to production. Work is tracked in [issues](https://github.com/jusso-dev/brigalow/issues) and [ROADMAP.md](ROADMAP.md).
+> **Status: Phase 0 foundations implemented.** Config, health checks, tenant-scoped persistence and offline audit-chain verification are available. Identity and signing remain unimplemented; nothing here is ready to sign real software. Don't deploy it to production. Work is tracked in [issues](https://github.com/jusso-dev/brigalow/issues) and [ROADMAP.md](ROADMAP.md).
 
 ## Why
 
@@ -35,13 +35,25 @@ Brigalow is not a certificate authority and can't make a signature publicly trus
 
 ## Build
 
-Requires stable Rust.
+Requires stable Rust (CI uses the current stable release), OpenSSL, Python 3 and Docker Compose for integration tests.
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# Use your explicitly selected local Docker context (e.g. orbstack on macOS).
+scripts/e2e.sh --context orbstack
 ```
+
+The end-to-end harness creates disposable Postgres and SoftHSM2 containers, generates passwords and TLS keys at runtime, runs acceptance tests, starts the server, checks health and secret redaction, then removes its containers, image, network and temporary files. It does not enrol with a CA or contact a signing service. See [local development](docs/development.md) for configuration and database setup.
+
+Verify a single-organisation audit export offline:
+
+```bash
+cargo run -p brig -- audit verify export.jsonl
+```
+
+This checks chain integrity. Signed checkpoints and protection against whole-chain replacement or suffix truncation are not implemented yet.
 
 ## Licence
 

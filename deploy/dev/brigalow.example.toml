@@ -1,0 +1,10 @@
+# Non-secret configuration only. Password/PIN values belong in env or 0600 files.
+mode = "lab"
+bind = "127.0.0.1:8080"
+db_host = "127.0.0.1"
+db_port = 5432
+db_name = "brigalow"
+db_user = "brigalow_runtime"
+# db_ca_file = "/path/to/local-test-ca.crt"
+# db_password_file = "/path/to/password"  # alternative: BRIGALOW_DB_PASSWORD
+# hsm_pin_file = "/path/to/pin"          # alternative: BRIGALOW_HSM_PIN

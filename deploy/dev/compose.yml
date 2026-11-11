@@ -5,8 +5,19 @@ services:
     environment:
       POSTGRES_DB: brigalow
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        cp /run/secrets/server_key /tmp/server.key
+        cp /run/secrets/server_cert /tmp/server.crt
+        chown postgres:postgres /tmp/server.key /tmp/server.crt
+        chmod 0600 /tmp/server.key
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key
     secrets:
       - postgres_password
+      - server_key
+      - server_cert
     ports:
       - "127.0.0.1::5432"
     tmpfs:
@@ -31,3 +42,7 @@ services:
 secrets:
   postgres_password:
     file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/postgres_password
+  server_key:
+    file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/server.key
+  server_cert:
+    file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/server.crt

@@ -1,6 +1,6 @@
 # Acceptance tests
 
-Each test must be automated. "Run" says where it lives once built. Integration tests use `docker compose -f deploy/dev/compose.yml up -d` (Postgres + SoftHSM2) and run with `cargo test --workspace --features integration`. End-to-end tests run with `scripts/e2e.sh`. None of these need a real CA, a cloud account or a purchased certificate.
+Each test must be automated. "Run" says where it lives once built. Integration tests use `deploy/dev/compose.yml` (Postgres + SoftHSM2) and run with `cargo test --workspace --features integration`. Use `scripts/e2e.sh --context <local-context>` to generate credentials and TLS keys, start Compose, set the test environment, run integration and end-to-end tests, then clean up. Missing integration configuration fails rather than silently skipping tests. None of these need a real CA, a cloud account or a purchased certificate.
 
 Verification uses independent tools where possible (OpenSSL), so we aren't only testing our code against itself.
 
@@ -66,3 +66,10 @@ Verification uses independent tools where possible (OpenSSL), so we aren't only 
 ## Web
 
 - **AT-WEB-01 Browser safety.** Every state-changing form rejects requests without a valid CSRF token. Responses carry a CSP with no `unsafe-inline` script, `X-Content-Type-Options: nosniff`, and cookies flagged `Secure; HttpOnly; SameSite=Strict`. Template output escapes `<script>` in project names.
+
+## Phase 0 automation
+
+- AT-OPS-01: `crates/brigalow-server/tests/redaction.rs` starts the real binary with generated environment secrets, forces a database startup error and checks both output streams. Config unit tests cover strict parsing, env precedence, secret-file permissions and symlink/source rejection. `scripts/e2e.py` checks live `/healthz` and absent `/debug` responses, lab labelling and database failure. CI job `secrets` scans full git history with checksum-pinned gitleaks and redacted findings.
+- AT-AUD-01: `crates/brig/tests/audit.rs` verifies 1,000 entries through the CLI, rejects a one-byte change at seq 500 and deletion at seq 10, and cross-checks SHA-256 with OpenSSL. Store integration persists 1,000 entries and exports them in 137-entry pages; the end-to-end harness repeats the CLI tamper checks on that database-backed export.
+- AT-TEN-01 (store level): `crates/brigalow-store/tests/foundations.rs` covers every object lookup kind in both tenant directions, pool reuse, RLS without query filters, cross-tenant inserts/references, restricted grants, rollback on failed audit insertion and concurrent chain appends. Key/policy/request rows are metadata placeholders; their feature semantics and API isolation arrive in later phases.
+- AT-AUD-02 is not complete: append-only grants are tested now, but signed checkpoints require the key backend. No other phase's acceptance test is claimed complete.

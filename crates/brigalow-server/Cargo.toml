@@ -11,3 +11,19 @@ workspace = true
 
 [dependencies]
 brigalow-core = { path = "../brigalow-core" }
+brigalow-store = { path = "../brigalow-store" }
+axum = "0.8"
+tokio.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+toml = "0.8"
+zeroize = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+uuid.workspace = true

@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Phase 0 in progress. The audit chain and offline verifier are implemented; other components remain planned unless the code says so.
+Status: Phase 0 foundations implemented: config, health endpoint, tenant store, audit chain and offline verifier. Identity, signing, approvals, gates, UI and signed audit checkpoints remain planned.
 
 ## Components
 

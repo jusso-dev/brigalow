@@ -87,7 +87,7 @@ Takeaway: the best model for **policy-as-gate**: submitters, purposes, origin cl
 | V6 | Projects, environments and **environment templates**; **flows** with standard approval steps by "Key Use Approvers" and a required approval count; projects inherit flows from templates. | Doc | https://docs.venafi.com/Docs/current/TopNav/Content/CodeSigning/t-codesigning-configuring-flows.php (search summary) |
 | V7 | Pricing | Unknown | not published |
 
-Takeaway: the virtual-HSM client pattern (native CSP/KSP/PKCS#11 shims talking to a central server) is the industry norm. The documented weakness of long-lived machine grants is a lesson: prefer short-lived, workload-bound credentials.
+Takeaway: the virtual-HSM client pattern (native CSP/KSP/PKCS#11 shims talking to a central server) is widespread among the products here, though not universal (see SignPath S7). The documented weakness of long-lived machine grants is a lesson: prefer short-lived, workload-bound credentials.
 
 ## 5. Encryption Consulting (CodeSign Secure)
 
@@ -150,9 +150,10 @@ Takeaway: the cost and CA/B Forum hardware-key rules are why public-trust signin
 | J3 | Pre-sign malware scanning; cloud and self-hosted; pricing on request; broad format list (Authenticode, JAR, APK, RPM, Debian, Docker, macOS/iOS packages, Helm charts). | 3P | https://www.itechguides.com/products/aujas-automated-code-signing-platform/ (review site, checked 20 Sep 2026 per that page) |
 | J4 | Current product status, ownership and site availability | Unknown | site returned 404 |
 
-## 9. GaraTrust (Garantir)
+## 9. GaraTrust (substitute source: Garantir, unconfirmed link to garatrust.com)
 
-- Requested URL: https://garatrust.com/ returned **HTTP 500** to the fetch tool and no response to a direct request on 2026-11-11. GaraTrust is a product of **Garantir**; the vendor's live pages are on garantir.io.
+- Requested URL: https://garatrust.com/ returned **HTTP 500** to the fetch tool and to a direct request on 2026-11-11 (served via a Pingora proxy, empty body).
+- **Substitute source, attribution unconfirmed.** The findings below come from garantir.io and an AWS Marketplace listing titled "GaraTrust - Unified Cryptographic Services Platform" that describes GaraTrust as Garantir's platform. No page we read links garatrust.com itself to Garantir (garantir.io/garatrust/ has no link to garatrust.com), so we could not prove the requested domain is the same vendor. Treat every G-row as "Garantir's GaraTrust", not as verified content of garatrust.com.
 
 | # | Finding | Status | Source |
 | --- | --- | --- | --- |
@@ -186,6 +187,6 @@ Takeaway: CLM, not signing. Relevant as an upstream: our product should track co
 
 | Fact | Status | Basis |
 | --- | --- | --- |
-| Publicly trusted code signing requires a CA-issued certificate after identity validation, with the key in certified hardware (CA/B Forum Code Signing Baseline Requirements). | Doc | SSL.com and Azure pages above reference the CA/B Forum hardware requirement; the CSBRs themselves were not re-read in this pass. |
+| Publicly trusted code signing requires a CA-issued certificate after identity validation, with the key in certified hardware (CA/B Forum Code Signing Baseline Requirements). It usually costs money; SignPath Foundation's certificates for open-source projects (S9) are an exception whose terms we did not confirm. | Doc | SSL.com and Azure pages above reference the CA/B Forum hardware requirement; the CSBRs themselves were not re-read in this pass. |
 | Timestamping (RFC 3161) is what keeps signatures valid after cert expiry. | Doc | Azure certificate management (A7), Keyfactor (K3), Encryption Consulting (E3) |
-| Hash-only signing is the dominant pattern for speed and IP protection; artifact upload is needed for deep signing and content inspection. | Doc | DigiCert (D5), EC (E2), Venafi (V5), Azure (A7), SignPath (S7) |
+| Hash-only signing is common for speed and IP protection but not universal: SignPath uploads artifacts for deep signing and inspection (S7), SignServer also signs whole documents server-side (K1, claim), Sectigo SCM doesn't sign (C6), Aujas unknown. | Doc / Claim | DigiCert (D5), EC (E2), Venafi (V5), Azure (A7), SignPath (S7) |

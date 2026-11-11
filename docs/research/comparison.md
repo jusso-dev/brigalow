@@ -14,7 +14,7 @@ Based on [evidence-register.md](evidence-register.md). Cell codes: **D** = vendo
 | Azure Artifact Signing | Managed signing + Microsoft CA | Azure service (D) | Signs digests, issues 72h certs (D) |
 | SSL.com eSigner for Code | CA + cloud HSM signing | SaaS (C) | Signs via CKA or CSC API (C) |
 | Aujas CodeSign | Signing platform | Cloud, self-hosted (3P) | Signs (3P) |
-| GaraTrust (Garantir) | Crypto services platform incl. signing | SaaS, on-prem, air-gapped (C) | Signs hashes (C) |
+| GaraTrust (substitute source: Garantir, link to garatrust.com unconfirmed) | Crypto services platform incl. signing | SaaS, on-prem, air-gapped (C) | Signs hashes (C) |
 | Sectigo Certificate Manager | Certificate lifecycle management | SaaS (C) | Neither: manages certificates (D) |
 
 ## Capability matrix
@@ -38,7 +38,7 @@ Based on [evidence-register.md](evidence-register.md). Cell codes: **D** = vendo
 
 ## Patterns worth adopting (as ideas, not copies)
 
-1. **Hash-only signing with native shims** (DigiCert, Venafi, EC, GaraTrust). Small network payload; the artifact stays with the build.
+1. **Hash-only signing with native shims** (DigiCert, Venafi, EC, Azure; GaraTrust claims it). Small network payload; the artifact stays with the build. Not universal: SignPath uploads artifacts so it can deep-sign and inspect them.
 2. **Purpose-typed policies** so release keys can't be used by test policies (SignPath S3).
 3. **Deny-wins k-of-n approvals** (SignPath S4) that are **asynchronous**, unlike the fixed 100-second window in EC (E5).
 4. **Release windows**: offline keys usable only in a named, time-boxed release with a signature cap (DigiCert D2, D3).
@@ -51,4 +51,4 @@ Based on [evidence-register.md](evidence-register.md). Cell codes: **D** = vendo
 
 - No open-source, production-intended signing control plane with HSM support. SignServer CE dropped HSMs in 7.7.1 and calls itself non-production (K8, K9).
 - Approval UX in several products assumes a human is watching a screen during the build.
-- Public trust always depends on a CA. Every serious product either is a CA or integrates one. An open-source product must be explicit about that line.
+- Public trust always depends on a CA, and usually on paid enrolment (SignPath Foundation's open-source certificates are an exception, terms unconfirmed). Every product here that offers public trust either is a CA or integrates one. An open-source product must be explicit about that line.

@@ -36,7 +36,7 @@ Status: Phase 0 in progress. The audit chain and offline verifier are implemente
 | `brigalow-server` | axum app, OIDC, RBAC, admin UI templates, webhook gates, metrics. |
 | `brig` | CLI client. |
 
-The current scaffold has `brigalow-core`, `brigalow-server` and `brig` only. Add the other crates when the first real code needs them.
+Phase 0 adds `brigalow-store`. Add `brigalow-crypto` when backend code first needs it. Key, policy and request tables currently contain tenant-linked metadata placeholders only; they confer no signing authority.
 
 ## Signing request lifecycle
 

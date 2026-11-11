@@ -48,3 +48,10 @@ Method: STRIDE over the data flows in [architecture.md](architecture.md), plus s
 - Brigalow signs digests. It cannot prove the digest matches a benign artifact. Origin rules, gates and attestations reduce, not remove, this risk.
 - A fully compromised Brigalow host with an activated HSM session can request signatures while it stays compromised. HSM-side key use policies, short release windows and caps limit the damage.
 - Public trust depends on the CA's own controls and revocation.
+
+## Phase 0 implementation boundaries
+
+- B4: runtime database credentials inherit the non-owning `brigalow_app` role. Migrations run separately as an owner; the server must reject superuser, BYPASSRLS, role-management and table-owner credentials. Every tenant operation uses a transaction-local organisation context, explicit `org_id` predicates and forced row-level security. Composite foreign keys prohibit cross-tenant and cross-project references. The tenant handle is a trusted internal API, not authentication: Phase 0 has no tenant HTTP routes; Phase 1 must derive its organisation from verified identity.
+- Project creation and its audit entry commit together. Per-organisation transaction advisory locks serialise audit appends, including the first append. Audit grants permit only SELECT and INSERT; tests also attempt UPDATE, DELETE and TRUNCATE as the runtime login.
+- The chain uses RFC 8785 and SHA-256. Phase 0 does not yet implement signed checkpoints: an owner can rewrite the full chain or truncate its suffix without detection by the standalone verifier. Retain an independently authenticated head; AT-AUD-02 remains pending.
+- Local Compose uses generated passwords, a loopback-only random Postgres port, ephemeral database storage and an isolated SoftHSM2 token directory. SoftHSM2 is a test dependency, not hardware-backed custody or a production fallback. Test IdP/JWKS and TSA services arrive with Phases 1 and 3 respectively.

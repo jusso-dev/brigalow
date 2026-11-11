@@ -1,0 +1,33 @@
+# Disposable local test infrastructure. Run through scripts/e2e.sh.
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: brigalow
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    ports:
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d brigalow"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+  softhsm:
+    build:
+      context: .
+      dockerfile: SoftHSM.Dockerfile
+    command: ["sleep", "infinity"]
+    tmpfs:
+      - /var/lib/softhsm/tokens
+    healthcheck:
+      test: ["CMD", "softhsm2-util", "--show-slots"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+secrets:
+  postgres_password:
+    file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/postgres_password

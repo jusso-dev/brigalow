@@ -1,3 +1,4 @@
+mod sign;
 use brigalow_core::audit::{Entry, Verifier};
 use std::io::{BufRead, BufReader, Read};
 
@@ -28,8 +29,18 @@ fn verify(path: &std::ffi::OsStr) -> Result<u64, String> {
     verifier.finish().map_err(|e| e.to_string())
 }
 
-fn main() -> std::process::ExitCode {
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "sign") {
+        return match sign::run(&args[1..]).await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     if args.len() == 1 && args[0] == "--version" {
         println!("brig {}", env!("CARGO_PKG_VERSION"));
         return std::process::ExitCode::SUCCESS;

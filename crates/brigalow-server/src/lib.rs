@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod keys;
+pub mod signing;
 pub mod web;
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
@@ -19,6 +20,7 @@ pub struct AppState {
     pub mode: Mode,
     pub identity: Option<Arc<auth::Identity>>,
     pub keys: Option<keys::KeyService>,
+    pub tsa: Option<brigalow_crypto::timestamp::Client>,
 }
 pub fn router(store: Store, mode: Mode) -> Router {
     application(AppState {
@@ -26,6 +28,7 @@ pub fn router(store: Store, mode: Mode) -> Router {
         mode,
         identity: None,
         keys: None,
+        tsa: None,
     })
 }
 pub fn application(state: AppState) -> Router {
@@ -56,6 +59,14 @@ pub fn application(state: AppState) -> Router {
             ),
         );
     }
+    for (kind, _, path) in signing::ROUTES {
+        let method = match kind {
+            signing::Route::CreatePolicy => post(signing::create_policy),
+            signing::Route::LookupPolicy => get(signing::lookup_policy),
+            signing::Route::Submit => post(signing::submit),
+        };
+        router = router.route(path, method);
+    }
     router
         .route(web::TENANT_MUTATIONS[0].1, post(web::create_project))
         .route(web::TENANT_MUTATIONS[1].1, post(web::issue_token))
@@ -80,7 +91,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
             StatusCode::SERVICE_UNAVAILABLE
         },
         Json(
-            serde_json::json!({"status":if healthy{"ok"}else{"unavailable"},"mode":state.mode,"signing_available":false}),
+            serde_json::json!({"status":if healthy{"ok"}else{"unavailable"},"mode":state.mode,"signing_available":state.keys.is_some() && state.identity.is_some()}),
         ),
     )
 }

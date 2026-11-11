@@ -4,6 +4,7 @@
 
 pub mod audit;
 pub mod keys;
+pub mod policy;
 pub mod rbac;
 
 /// What a signing policy or key is for. Release keys must never be used by

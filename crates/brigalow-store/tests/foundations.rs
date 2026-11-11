@@ -75,15 +75,17 @@ async fn at_ten_01_store_isolation_and_atomic_audit() {
             .execute(&admin)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO brigalow.policies VALUES ($1,$2,$3,$4)")
-            .bind(org)
-            .bind(policy)
-            .bind(project)
-            .bind(key)
-            .execute(&admin)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO brigalow.sign_requests VALUES ($1,$2,$3,$4)")
+        sqlx::query(
+            "INSERT INTO brigalow.policies (org_id,id,project_id,key_id) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(org)
+        .bind(policy)
+        .bind(project)
+        .bind(key)
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO brigalow.sign_requests (org_id,id,project_id,policy_id) VALUES ($1,$2,$3,$4)")
             .bind(org)
             .bind(request)
             .bind(project)

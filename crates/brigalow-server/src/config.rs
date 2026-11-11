@@ -41,6 +41,31 @@ pub struct AnchorConfig {
     pub file: PathBuf,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TsaConfig {
+    pub url: String,
+    pub tls_ca_file: Option<PathBuf>,
+    pub signer_file: PathBuf,
+    pub anchors: Vec<PathBuf>,
+}
+impl TsaConfig {
+    pub fn client(&self) -> Result<brigalow_crypto::timestamp::Client, ConfigError> {
+        let read = |path: &PathBuf| {
+            std::fs::read(path).map_err(|_| ConfigError("cannot read TSA certificate"))
+        };
+        let signer = read(&self.signer_file)?;
+        let anchors = self
+            .anchors
+            .iter()
+            .map(read)
+            .collect::<Result<Vec<_>, _>>()?;
+        let ca = self.tls_ca_file.as_ref().map(read).transpose()?;
+        brigalow_crypto::timestamp::Client::new(&self.url, ca.as_deref(), signer, anchors)
+            .map_err(|_| ConfigError("invalid TSA configuration"))
+    }
+}
+
 pub struct Config {
     pub mode: Mode,
     pub bind: SocketAddr,
@@ -55,6 +80,7 @@ pub struct Config {
     pub hsm_module: Option<PathBuf>,
     pub hsm_token: Option<String>,
     pub trust_anchors: Vec<AnchorConfig>,
+    pub tsa: Option<TsaConfig>,
     hsm_pin: Option<Secret>,
 }
 impl fmt::Debug for Config {
@@ -89,6 +115,7 @@ struct FileConfig {
     hsm_module: Option<PathBuf>,
     hsm_token: Option<String>,
     trust_anchors: Option<Vec<AnchorConfig>>,
+    tsa: Option<TsaConfig>,
 }
 
 fn secret_file(path: &Path) -> Result<String, ConfigError> {
@@ -215,6 +242,7 @@ impl Config {
                 .or(file.hsm_module),
             hsm_token: env("BRIGALOW_HSM_TOKEN")?.or(file.hsm_token),
             trust_anchors: file.trust_anchors.unwrap_or_default(),
+            tsa: file.tsa,
             mode,
             bind,
             db_host: env("BRIGALOW_DB_HOST")?

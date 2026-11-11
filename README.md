@@ -2,7 +2,7 @@
 
 Open-source, self-hosted signing control plane. Build systems send a digest; Brigalow checks who is asking and whether policy allows it, has a key in an HSM sign it, and keeps a tamper-evident record.
 
-> **Status: Phases 0–2 implemented; see phase issues for CI evidence.** Config, health checks, tenant-scoped persistence and offline audit-chain verification are available. OIDC identity, scoped tokens and initial administration pages are available. PKCS#11/lab backends and custodian key/certificate APIs are available. Signing requests remain unimplemented; nothing here is ready to sign real software. Don't deploy it to production. Work is tracked in [issues](https://github.com/jusso-dev/brigalow/issues) and [ROADMAP.md](ROADMAP.md).
+> **Status: Phases 0–3 implemented; see phase issues for CI evidence.** Config, health checks, tenant-scoped persistence and offline audit-chain verification are available. OIDC identity, scoped tokens and initial administration pages are available. PKCS#11/lab backends and custodian key/certificate APIs are available. Digest signing, detached CMS and verified RFC 3161 timestamps are available. Approvals, release windows and gates remain pending; nothing here is ready to sign real software. Don't deploy it to production. Work is tracked in [issues](https://github.com/jusso-dev/brigalow/issues) and [ROADMAP.md](ROADMAP.md).
 
 ## Why
 

@@ -40,6 +40,15 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
     extensions.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost\n")
     openssl("x509", "-req", "-in", csr, "-CA", ca_cert, "-CAkey", ca_key, "-CAcreateserial",
             "-out", server_cert, "-days", "1", "-extfile", str(extensions))
+    tsa_key, tsa_csr, tsa_cert = [str(Path(directory)/name) for name in ("tsa.key","tsa.csr","tsa.pem")]
+    openssl("req","-new","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-nodes","-keyout",tsa_key,"-out",tsa_csr,"-subj","/CN=Brigalow ephemeral TSA")
+    tsa_ext=Path(directory)/"tsa.ext"
+    tsa_ext.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,timeStamping\n")
+    openssl("x509","-req","-in",tsa_csr,"-CA",ca_cert,"-CAkey",ca_key,"-CAcreateserial","-out",tsa_cert,"-days","1","-extfile",str(tsa_ext))
+    for source, name in [(ca_cert,"ca.der"),(tsa_cert,"tsa.der")]:
+        openssl("x509","-in",source,"-outform","DER","-out",str(Path(directory)/name))
+    env["BRIGALOW_TEST_TLS_CERT_FILE"]=server_cert
+    env["BRIGALOW_TEST_TLS_KEY_FILE"]=server_key
     env["BRIGALOW_TEST_DB_CA_FILE"] = ca_cert
     try:
         run(compose + ["up", "-d", "--build", "--wait", "--wait-timeout", "120"])
@@ -49,6 +58,9 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
         env["BRIGALOW_TEST_APP_PASSWORD_FILE"] = str(Path(directory) / "app_password")
         idp_address = run(compose + ["port", "idp", "8443"], capture_output=True, text=True).stdout.strip()
         env["BRIGALOW_TEST_IDP_URL"] = "https://" + idp_address
+        tsa_address = run(compose + ["port", "tsa", "8443"], capture_output=True, text=True).stdout.strip()
+        env["BRIGALOW_TEST_TSA_URL"] = "https://" + tsa_address
+        run(["cargo", "build", "--locked", "-p", "brig"])
         run(["cargo", "test", "--locked", "-p", "brigalow-store", "--features", "integration"])
         run(["cargo", "test", "--locked", "--workspace", "--features", "integration"])
         # Independently invoke the public CLI on the database-backed export.

@@ -23,6 +23,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use tower::ServiceExt;
 use uuid::Uuid;
 struct Fixture {
+    keys: brigalow_server::keys::KeyService,
+    tsa: brigalow_crypto::timestamp::Client,
     router: Router,
     store: Store,
     admin: PgPool,
@@ -82,15 +84,17 @@ async fn fixture() -> Fixture {
             .execute(&admin)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO brigalow.policies VALUES ($1,$2,$3,$4)")
-            .bind(org)
-            .bind(objects[i][2])
-            .bind(objects[i][0])
-            .bind(objects[i][1])
-            .execute(&admin)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO brigalow.sign_requests VALUES ($1,$2,$3,$4)")
+        sqlx::query(
+            "INSERT INTO brigalow.policies (org_id,id,project_id,key_id) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(org)
+        .bind(objects[i][2])
+        .bind(objects[i][0])
+        .bind(objects[i][1])
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO brigalow.sign_requests (org_id,id,project_id,policy_id) VALUES ($1,$2,$3,$4)")
             .bind(org)
             .bind(objects[i][3])
             .bind(objects[i][0])
@@ -151,17 +155,33 @@ async fn fixture() -> Fixture {
         )
         .build()
         .unwrap();
+    let secrets = std::path::PathBuf::from(std::env::var("BRIGALOW_TEST_SECRETS").unwrap());
+    let keys = brigalow_server::keys::KeyService {
+        backend: Arc::new(brigalow_crypto::software::Software::new(true).unwrap()),
+        id: "test".into(),
+        anchors: vec![brigalow_server::keys::Anchor {
+            name: "test CA".into(),
+            tier: brigalow_core::TrustTier::Private,
+            der: std::fs::read(secrets.join("ca.der")).unwrap(),
+        }],
+    };
+    let tsa = brigalow_crypto::timestamp::Client::new(
+        &std::env::var("BRIGALOW_TEST_TSA_URL").unwrap(),
+        Some(&std::fs::read(secrets.join("ca.crt")).unwrap()),
+        std::fs::read(secrets.join("tsa.der")).unwrap(),
+        vec![std::fs::read(secrets.join("ca.der")).unwrap()],
+    )
+    .unwrap();
     let router = application(AppState {
-        keys: Some(brigalow_server::keys::KeyService {
-            backend: Arc::new(brigalow_crypto::software::Software::new(true).unwrap()),
-            id: "test".into(),
-            anchors: vec![],
-        }),
+        tsa: Some(tsa.clone()),
+        keys: Some(keys.clone()),
         store: store.clone(),
         mode: Mode::Lab,
         identity: Some(identity.clone()),
     });
     Fixture {
+        keys,
+        tsa,
         router,
         store,
         admin,
@@ -747,6 +767,7 @@ async fn at_ten_01_routes_at_web_01_csrf_xss_and_at_id_03_replay() {
             policy: f.objects[0][2],
         }),
         human: false,
+        claims: Default::default(),
     };
     assert!(f
         .store
@@ -777,6 +798,7 @@ async fn key_lifecycle_custody_tenancy_and_csrf() {
         roles: vec![Role::KeyCustodian],
         scope: None,
         human: true,
+        claims: Default::default(),
     };
     f.store
         .tenant(org)
@@ -987,6 +1009,667 @@ async fn key_lifecycle_custody_tenancy_and_csrf() {
         .update_key("stale", "key.activated", &key)
         .await
         .is_err());
+    f.store.close().await;
+    f.admin.close().await;
+}
+
+struct ChildGuard(std::process::Child);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn openssl_in(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("openssl")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "OpenSSL: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
+    use brigalow_core::{
+        keys::KeyRecord,
+        policy::{Policy, RequestState, SignRequest},
+        rbac::Principal,
+    };
+    use brigalow_server::signing::{CREATE_POLICY, LOOKUP_POLICY, SUBMIT};
+    use der::Decode;
+    use sha2::{Digest, Sha256};
+    use std::io::BufRead;
+    let mut f = fixture().await;
+    let org = f.orgs[0];
+    let project = f.objects[0][0];
+    let secret = auth::random_secret();
+    let csrf = auth::random_secret();
+    let custodian = Principal {
+        org_id: org,
+        actor: "signing-custodian".into(),
+        roles: vec![Role::KeyCustodian],
+        scope: None,
+        human: true,
+        claims: Default::default(),
+    };
+    f.store
+        .tenant(org)
+        .issue_credential(
+            &auth::hash(&secret),
+            &custodian,
+            Some(&csrf),
+            auth::now() + 600,
+            "fixture",
+        )
+        .await
+        .unwrap();
+    let cookie = format!("__Host-brigalow={org}.{secret}");
+    let keypath = format!("/v1/orgs/{org}/projects/{project}/keys");
+    let result = request(
+        &f,
+        "POST",
+        &keypath,
+        Some(&cookie),
+        None,
+        Some(&csrf),
+        json!({"algorithm":"p256","purpose":"test","offline":false}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let key: KeyRecord = serde_json::from_str(&result.2).unwrap();
+    let key_id = key.key.id;
+    let keypath = format!("/v1/orgs/{org}/keys/{key_id}");
+    let result = request(
+        &f,
+        "POST",
+        &format!("{keypath}/csr"),
+        Some(&cookie),
+        None,
+        Some(&csrf),
+        json!({"subject":"CN=Signing acceptance"}),
+    )
+    .await;
+    assert_eq!(result.0, 200);
+    let csr: Value = serde_json::from_str(&result.2).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let secrets = std::path::PathBuf::from(std::env::var("BRIGALOW_TEST_SECRETS").unwrap());
+    std::fs::write(d.join("key.csr"), csr["csr"].as_str().unwrap()).unwrap();
+    std::fs::write(d.join("leaf.ext"),"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n").unwrap();
+    openssl_in(
+        d,
+        &[
+            "x509",
+            "-req",
+            "-in",
+            "key.csr",
+            "-CA",
+            secrets.join("ca.crt").to_str().unwrap(),
+            "-CAkey",
+            secrets.join("ca.key").to_str().unwrap(),
+            "-set_serial",
+            "42",
+            "-out",
+            "leaf.der",
+            "-outform",
+            "DER",
+            "-days",
+            "1",
+            "-extfile",
+            "leaf.ext",
+        ],
+    );
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &format!("{keypath}/certificate"),
+            Some(&cookie),
+            None,
+            Some(&csrf),
+            json!({"chain":[std::fs::read(d.join("leaf.der")).unwrap()]})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &format!("{keypath}/activate"),
+            Some(&cookie),
+            None,
+            Some(&csrf),
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    let (admin, admin_csrf) = login(&f, org).await;
+    let path = CREATE_POLICY
+        .replace("{org}", &org.to_string())
+        .replace("{id}", &project.to_string());
+    let policy_input = json!({"name":"test","key":key_id,"purpose":"test","claims":{},"algorithms":["p256"],"timestamp":"required"});
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &path,
+            Some(&admin),
+            None,
+            None,
+            policy_input.clone()
+        )
+        .await
+        .0,
+        403
+    );
+    let result = request(
+        &f,
+        "POST",
+        &path,
+        Some(&admin),
+        None,
+        Some(&admin_csrf),
+        policy_input.clone(),
+    )
+    .await;
+    assert_eq!(result.0, 201, "{}", result.2);
+    let policy: Policy = serde_json::from_str(&result.2).unwrap();
+    let mut wrong = policy_input.clone();
+    wrong["purpose"] = json!("release");
+    wrong["name"] = json!("release");
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &path,
+            Some(&admin),
+            None,
+            Some(&admin_csrf),
+            wrong
+        )
+        .await
+        .0,
+        422
+    );
+    // Every new registered route receives foreign tenant IDs.
+    let foreign = CREATE_POLICY
+        .replace("{org}", &org.to_string())
+        .replace("{id}", &f.objects[1][0].to_string());
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &foreign,
+            Some(&admin),
+            None,
+            Some(&admin_csrf),
+            policy_input
+        )
+        .await
+        .0,
+        404
+    );
+    let foreign = LOOKUP_POLICY
+        .replace("{org}", &org.to_string())
+        .replace("{id}", &f.objects[1][0].to_string())
+        .replace("{name}", "test");
+    assert_eq!(
+        request(&f, "GET", &foreign, Some(&admin), None, None, Value::Null)
+            .await
+            .0,
+        404
+    );
+    let result = request(
+        &f,
+        "POST",
+        &format!("/v1/orgs/{org}/tokens"),
+        Some(&admin),
+        None,
+        Some(&admin_csrf),
+        json!({"project":project,"policy":policy.id,"expires_at":auth::now()+600}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let token: Value = serde_json::from_str(&result.2).unwrap();
+    let token = token["token"].as_str().unwrap().to_string();
+    let submit = SUBMIT
+        .replace("{org}", &org.to_string())
+        .replace("{id}", &project.to_string());
+    let artifact = b"artifact bytes must stay local: Brigalow acceptance fixture\n".repeat(4096);
+    std::fs::write(d.join("artifact.bin"), &artifact).unwrap();
+    let digest: Vec<u8> = Sha256::digest(&artifact).to_vec();
+    let input = |policy: Uuid| json!({"request_id":Uuid::new_v4(),"policy":policy,"digest_alg":"sha256","digest":digest,"artifact_name":"artifact.bin","format":"raw","metadata":{}});
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &submit,
+            None,
+            Some(&token),
+            None,
+            input(Uuid::new_v4())
+        )
+        .await
+        .0,
+        404
+    );
+    let foreign = SUBMIT
+        .replace("{org}", &org.to_string())
+        .replace("{id}", &f.objects[1][0].to_string());
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &foreign,
+            None,
+            Some(&token),
+            None,
+            input(policy.id)
+        )
+        .await
+        .0,
+        404
+    );
+    for (kind, method, path) in brigalow_server::signing::ROUTES {
+        let path = path
+            .replace("{org}", &org.to_string())
+            .replace("{id}", &f.objects[1][0].to_string())
+            .replace("{name}", "test");
+        let body = match kind {
+            brigalow_server::signing::Route::CreatePolicy => {
+                json!({"name":"foreign","key":key_id,"purpose":"test","claims":{},"algorithms":["p256"],"timestamp":"disabled"})
+            }
+            brigalow_server::signing::Route::LookupPolicy => Value::Null,
+            brigalow_server::signing::Route::Submit => input(policy.id),
+        };
+        assert_eq!(
+            request(&f, method, &path, None, Some(&token), None, body)
+                .await
+                .0,
+            404
+        );
+    }
+    let mut sha1 = input(policy.id);
+    sha1["digest_alg"] = json!("sha1");
+    assert_eq!(
+        request(&f, "POST", &submit, None, Some(&token), None, sha1)
+            .await
+            .0,
+        422
+    );
+    let replay = input(policy.id);
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &submit,
+            None,
+            Some(&token),
+            None,
+            replay.clone()
+        )
+        .await
+        .0,
+        201
+    );
+    assert_eq!(
+        request(&f, "POST", &submit, None, Some(&token), None, replay)
+            .await
+            .0,
+        409
+    );
+    // A human submitter still needs CSRF on the signing route.
+    let submitter_secret = auth::random_secret();
+    let mut submitter = custodian.clone();
+    submitter.roles = vec![Role::Submitter];
+    f.store
+        .tenant(org)
+        .issue_credential(
+            &auth::hash(&submitter_secret),
+            &submitter,
+            Some(&csrf),
+            auth::now() + 600,
+            "fixture",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &submit,
+            Some(&format!("__Host-brigalow={org}.{submitter_secret}")),
+            None,
+            None,
+            input(policy.id)
+        )
+        .await
+        .0,
+        403
+    );
+    // Actual HTTPS CLI transport, capture bodies at the real axum listener.
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let capture = captured.clone();
+    let app = f.router.clone().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let capture = capture.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let bytes = axum::body::to_bytes(body, 65536).await.unwrap();
+                if parts.uri.path().ends_with("/sign-requests") {
+                    capture.lock().unwrap().push(bytes.to_vec());
+                }
+                next.run(Request::from_parts(parts, Body::from(bytes)))
+                    .await
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut proxy = ChildGuard(
+        std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deploy/dev/test_proxy.py"
+            ))
+            .arg(port.to_string())
+            .arg(std::env::var("BRIGALOW_TEST_TLS_CERT_FILE").unwrap())
+            .arg(std::env::var("BRIGALOW_TEST_TLS_KEY_FILE").unwrap())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    std::io::BufReader::new(proxy.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let url = format!("https://127.0.0.1:{}", line.trim());
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("brig");
+    for format in ["raw", "cms"] {
+        let mut command = std::process::Command::new(&binary);
+        command.current_dir(d).env("BRIGALOW_TOKEN", &token).args([
+            "sign",
+            "--server",
+            &url,
+            "--org",
+            &org.to_string(),
+            "--project",
+            &project.to_string(),
+            "--policy",
+            "test",
+            "--format",
+            format,
+            "--output",
+            &format!("artifact.{format}"),
+            "--ca-file",
+            secrets.join("ca.crt").to_str().unwrap(),
+            "artifact.bin",
+        ]);
+        let result = tokio::task::spawn_blocking(move || command.output().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let bodies = captured.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2);
+    for body in &bodies {
+        assert!(body.len() < 1024);
+        assert!(!body.windows(20).any(|w| w == &artifact[..20]));
+        let v: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(v["digest"], json!(digest));
+    }
+    std::fs::write(d.join("public.der"), key.public_key).unwrap();
+    std::fs::write(d.join("digest"), &digest).unwrap();
+    openssl_in(
+        d,
+        &[
+            "pkeyutl",
+            "-verify",
+            "-pubin",
+            "-inkey",
+            "public.der",
+            "-keyform",
+            "DER",
+            "-sigfile",
+            "artifact.raw",
+            "-in",
+            "digest",
+            "-pkeyopt",
+            "digest:sha256",
+        ],
+    );
+    openssl_in(
+        d,
+        &[
+            "cms",
+            "-verify",
+            "-binary",
+            "-inform",
+            "DER",
+            "-in",
+            "artifact.cms",
+            "-content",
+            "artifact.bin",
+            "-CAfile",
+            secrets.join("ca.crt").to_str().unwrap(),
+            "-purpose",
+            "any",
+            "-out",
+            "verified",
+        ],
+    );
+    let cms =
+        ::cms::content_info::ContentInfo::from_der(&std::fs::read(d.join("artifact.cms")).unwrap())
+            .unwrap();
+    let data: ::cms::signed_data::SignedData = cms.content.decode_as().unwrap();
+    let signer = data.signer_infos.0.get(0).unwrap();
+    assert!(signer
+        .unsigned_attrs
+        .as_ref()
+        .unwrap()
+        .iter()
+        .any(|a| a.oid.to_string() == "1.2.840.113549.1.9.16.2.14"));
+    std::fs::write(d.join("cms-signature"), signer.signature.as_bytes()).unwrap();
+    openssl_in(
+        d,
+        &[
+            "ts",
+            "-verify",
+            "-in",
+            "artifact.cms.tsr",
+            "-token_in",
+            "-data",
+            "cms-signature",
+            "-CAfile",
+            secrets.join("ca.crt").to_str().unwrap(),
+            "-untrusted",
+            secrets.join("tsa.pem").to_str().unwrap(),
+        ],
+    );
+    server.abort();
+    drop(proxy);
+    // Exact release-key/test-policy mismatch, including an owner-forced binding.
+    sqlx::query("UPDATE brigalow.signing_keys SET record=jsonb_set(record,'{key,purpose}','\"release\"') WHERE org_id=$1 AND id=$2").bind(org).bind(key_id).execute(&f.admin).await.unwrap();
+    let create = CREATE_POLICY
+        .replace("{org}", &org.to_string())
+        .replace("{id}", &project.to_string());
+    assert_eq!(request(&f,"POST",&create,Some(&admin),None,Some(&admin_csrf),json!({"name":"mismatch","key":key_id,"purpose":"test","claims":{},"algorithms":["p256"],"timestamp":"disabled"})).await.0,422);
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &submit,
+            None,
+            Some(&token),
+            None,
+            input(policy.id)
+        )
+        .await
+        .0,
+        403
+    );
+    sqlx::query("UPDATE brigalow.signing_keys SET record=jsonb_set(record,'{key,purpose}','\"test\"') WHERE org_id=$1 AND id=$2").bind(org).bind(key_id).execute(&f.admin).await.unwrap();
+    // Persisted policy tampering cannot bypass the independent sign-time binding check.
+    sqlx::query("UPDATE brigalow.policies SET record=jsonb_set(record,'{purpose}','\"release\"') WHERE org_id=$1 AND id=$2").bind(org).bind(policy.id).execute(&f.admin).await.unwrap();
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &submit,
+            None,
+            Some(&token),
+            None,
+            input(policy.id)
+        )
+        .await
+        .0,
+        403
+    );
+    sqlx::query("UPDATE brigalow.policies SET record=$3 WHERE org_id=$1 AND id=$2")
+        .bind(org)
+        .bind(policy.id)
+        .bind(sqlx::types::Json(&policy))
+        .execute(&f.admin)
+        .await
+        .unwrap();
+    let down = brigalow_crypto::timestamp::Client::new(
+        &format!("{}/down", std::env::var("BRIGALOW_TEST_TSA_URL").unwrap()),
+        Some(&std::fs::read(secrets.join("ca.crt")).unwrap()),
+        std::fs::read(secrets.join("tsa.der")).unwrap(),
+        vec![std::fs::read(secrets.join("ca.der")).unwrap()],
+    )
+    .unwrap();
+    f.router = application(AppState {
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(down),
+    });
+    let failed = input(policy.id);
+    let failed_id: Uuid = serde_json::from_value(failed["request_id"].clone()).unwrap();
+    let result = request(&f, "POST", &submit, None, Some(&token), None, failed).await;
+    assert_eq!(result.0, 502);
+    assert!(!result.2.contains("output"));
+    let stored: SignRequest = f
+        .store
+        .tenant(org)
+        .sign_request(failed_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, RequestState::Failed);
+    assert!(stored.output.is_none());
+    assert!(stored.timestamp.is_none());
+    // A verified workload with a mismatched ref is rejected and names that claim in audit.
+    let mut workload_policy = policy.clone();
+    workload_policy.id = f.objects[0][2];
+    workload_policy.name = "workload".into();
+    workload_policy.claims = BTreeMap::from([
+        ("repository".into(), "acme/app".into()),
+        ("ref".into(), "refs/heads/main".into()),
+        ("environment".into(), "release".into()),
+    ]);
+    sqlx::query("UPDATE brigalow.policies SET key_id=$3,record=$4 WHERE org_id=$1 AND id=$2")
+        .bind(org)
+        .bind(workload_policy.id)
+        .bind(key_id)
+        .bind(sqlx::types::Json(&workload_policy))
+        .execute(&f.admin)
+        .await
+        .unwrap();
+    f.router = application(AppState {
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    let claims = json!({"aud":format!("brigalow:{org}"),"repository":"acme/app","ref":"refs/heads/main","environment":"release","workflow":"build"});
+    let valid = mint(&f, claims.clone(), false, "RS256").await;
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &submit,
+            None,
+            Some(&valid),
+            None,
+            input(workload_policy.id)
+        )
+        .await
+        .0,
+        201
+    );
+    let mut stricter = workload_policy.clone();
+    stricter
+        .claims
+        .insert("ref".into(), "refs/heads/protected".into());
+    sqlx::query("UPDATE brigalow.policies SET record=$3 WHERE org_id=$1 AND id=$2")
+        .bind(org)
+        .bind(stricter.id)
+        .bind(sqlx::types::Json(&stricter))
+        .execute(&f.admin)
+        .await
+        .unwrap();
+    let mut spoofed = input(stricter.id);
+    spoofed["metadata"] = json!({"ref":"refs/heads/protected"});
+    assert_eq!(
+        request(&f, "POST", &submit, None, Some(&valid), None, spoofed)
+            .await
+            .0,
+        403
+    );
+    sqlx::query("UPDATE brigalow.policies SET record=$3 WHERE org_id=$1 AND id=$2")
+        .bind(org)
+        .bind(workload_policy.id)
+        .bind(sqlx::types::Json(&workload_policy))
+        .execute(&f.admin)
+        .await
+        .unwrap();
+    let mut bad = claims;
+    bad["ref"] = json!("refs/heads/feature-x");
+    let bad = mint(&f, bad, false, "RS256").await;
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &submit,
+            None,
+            Some(&bad),
+            None,
+            input(workload_policy.id)
+        )
+        .await
+        .0,
+        401
+    );
+    let audit = f.store.tenant(org).audit_page(0, 1000).await.unwrap();
+    assert!(audit
+        .iter()
+        .any(|e| e.action == "request.rejected" && e.details["reason"] == "claim:ref"));
+    assert!(audit
+        .iter()
+        .any(|e| e.details["reason"] == "unknown_policy_or_project"));
     f.store.close().await;
     f.admin.close().await;
 }

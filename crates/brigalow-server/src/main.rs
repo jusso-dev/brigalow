@@ -51,6 +51,12 @@ async fn run() -> Result<(), &'static str> {
             })
         })
         .transpose()?;
+    let tsa = config
+        .tsa
+        .as_ref()
+        .map(|t| t.client())
+        .transpose()
+        .map_err(|_| "invalid TSA configuration")?;
     let store = Store::connect(config.database_options()).await.map_err(|_| {
         tracing::error!(?config, "database startup failed; check availability, TLS, migrations and restricted runtime role");
         "database startup failed"
@@ -64,7 +70,7 @@ async fn run() -> Result<(), &'static str> {
     if config.mode == Mode::Lab {
         tracing::warn!("LAB MODE: test use only; release signing unavailable");
     }
-    tracing::info!(address = %listener.local_addr().map_err(|_| "cannot inspect listener")?, mode = ?config.mode, "server listening; signing unavailable in Phase 0");
+    tracing::info!(address = %listener.local_addr().map_err(|_| "cannot inspect listener")?, mode = ?config.mode, "server listening");
     let identity = match std::env::var("BRIGALOW_IDENTITY_FILE") {
         Ok(path) => {
             let bytes = std::fs::read(path).map_err(|_| "cannot read identity configuration")?;
@@ -85,6 +91,7 @@ async fn run() -> Result<(), &'static str> {
             mode: config.mode,
             identity,
             keys,
+            tsa,
         }),
     )
     .with_graceful_shutdown(shutdown())

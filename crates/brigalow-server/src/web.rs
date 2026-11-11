@@ -37,6 +37,7 @@ impl From<crate::auth::AuthError> for WebError {
 impl From<brigalow_store::Error> for WebError {
     fn from(e: brigalow_store::Error) -> Self {
         Self(match e {
+            brigalow_store::Error::Invalid => StatusCode::UNPROCESSABLE_ENTITY,
             brigalow_store::Error::Conflict => StatusCode::CONFLICT,
             brigalow_store::Error::NotFound => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -217,6 +218,22 @@ pub async fn object(
             ));
         }
     }
+    if matches!(kind, RouteKind::Policy) {
+        if let Some(policy) = tenant.policy(id).await? {
+            return Ok(Json(
+                serde_json::to_value(policy)
+                    .map_err(|_| WebError(StatusCode::INTERNAL_SERVER_ERROR))?,
+            ));
+        }
+    }
+    if matches!(kind, RouteKind::Request) {
+        if let Some(request) = tenant.sign_request(id).await? {
+            return Ok(Json(
+                serde_json::to_value(request)
+                    .map_err(|_| WebError(StatusCode::INTERNAL_SERVER_ERROR))?,
+            ));
+        }
+    }
     let name = if matches!(kind, RouteKind::Project) {
         tenant.project_name(id).await?
     } else {
@@ -291,6 +308,7 @@ pub async fn issue_token(
             policy: input.policy,
         }),
         human: false,
+        claims: Default::default(),
     };
     let id = state
         .store

@@ -35,6 +35,8 @@ pub struct Principal {
     pub roles: Vec<Role>,
     pub scope: Option<Scope>,
     pub human: bool,
+    #[serde(default)]
+    pub claims: std::collections::BTreeMap<String, String>,
 }
 impl Principal {
     pub fn allows(&self, action: Action) -> bool {
@@ -72,6 +74,7 @@ mod tests {
             roles: vec![Role::OrgAdmin],
             scope: None,
             human: true,
+            claims: Default::default(),
         };
         assert!(p.allows(Action::ManageIdentity));
         assert!(!p.allows(Action::Submit));

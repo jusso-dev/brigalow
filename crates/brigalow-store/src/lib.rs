@@ -10,12 +10,15 @@ use uuid::Uuid;
 
 pub mod identity;
 pub mod keys;
+pub mod signing;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 // Do not expose driver errors: Postgres errors may contain submitted data or credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid state or policy")]
+    Invalid,
     #[error("database operation failed")]
     Database,
     #[error("request already used")]

@@ -1,5 +1,34 @@
 use super::*;
 impl Identity {
+    /// Diagnostic only: reverify before naming a failed configured claim in the audit log.
+    pub async fn rejected_claim(
+        &self,
+        org: Uuid,
+        token: &str,
+        scope: &Scope,
+    ) -> Option<(String, String)> {
+        for a in self
+            .config
+            .authorities
+            .iter()
+            .filter(|a| a.org_id == org && !a.workloads.is_empty())
+        {
+            let Ok((claims, _)) = self.verified(a, token, &format!("brigalow:{org}")).await else {
+                continue;
+            };
+            let rule = a
+                .workloads
+                .iter()
+                .find(|r| r.project == scope.project && r.policy == scope.policy)?;
+            let (name, _) = rule
+                .claims
+                .iter()
+                .find(|(k, v)| claims.get(*k).and_then(|c| c.as_str()) != Some(v.as_str()))?;
+            let p = Self::principal(a, &claims, vec![], None, false).ok()?;
+            return Some((p.actor, name.clone()));
+        }
+        None
+    }
     pub async fn workload(
         &self,
         org: Uuid,

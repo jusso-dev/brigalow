@@ -249,6 +249,30 @@ impl Identity {
             roles,
             scope,
             human,
+            claims: [
+                "iss",
+                "sub",
+                "repository",
+                "ref",
+                "workflow",
+                "environment",
+                "sha",
+                "job_workflow_ref",
+                "run_id",
+                "ref_protected",
+            ]
+            .into_iter()
+            .filter_map(|name| {
+                claims
+                    .get(name)
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        serde_json::Value::Bool(b) => Some(b.to_string()),
+                        _ => None,
+                    })
+                    .map(|v| (name.to_string(), v))
+            })
+            .collect(),
         })
     }
 }

@@ -69,3 +69,21 @@ Backends default to `disabled`. Configure `backend = "pkcs11"`, stable `backend_
 Optional TOML `[[trust_anchors]]` entries have `name`, `tier = "private"` or `"external-ca"`, and `file` pointing to a DER certificate. Only operator configuration can classify anchors. `external-ca` is configuration evidence, never a public-trust assertion. Imported chains require code-signing EKU. Software keys retain lab classification even after valid certificate import.
 
 Custodian JSON API: `POST /v1/orgs/<org>/projects/<project>/keys` with `algorithm` (`rsa3072`, `p256`, `ed25519` where supported), `purpose` (`test`/`release`) and `offline` boolean. Read public metadata at `GET /v1/orgs/<org>/keys/<key>`. Lifecycle POST routes below that key: `/csr` with `subject` (RFC 4514 distinguished name); `/certificate` with `chain` (leaf-first arrays of DER bytes); `/activate`, `/disable`, `/retire` with `{}`. All require the existing session Origin/CSRF protection. Certificate import precedes activation for release keys. Disable is permanent; retire requires disabled state. There is no export route. Digest signing arrives in Phase 3; offline keys remain unavailable until release-window controls exist.
+
+## Digest signing (Phase 3)
+
+An org/project admin creates a named policy using `POST /v1/orgs/<org>/projects/<project>/policies`: `name` (lowercase letters/digits/hyphens), `key`, `purpose`, `claims` (exact verified claim matches), `algorithms`, and `timestamp` (`disabled`, `optional`, `required`). Release policies require repository/ref/environment rules and `ref_protected = "true"`; only an IdP-verified claim can satisfy this. API credentials carry no invented workload claims, so use a policy that explicitly allows their scope. Policies are immutable in this initial API. Read by UUID through the existing policy route or by name through `/projects/<project>/policies/<name>`.
+
+`POST /v1/orgs/<org>/projects/<project>/sign-requests` accepts `request_id`, `policy` UUID, `digest_alg = "sha256"`, `digest` (32 bytes), `artifact_name`, `format` (`raw` or `cms`) and optional self-reported `metadata`. No artifact upload field exists. Request IDs never retry a signature. Query `/v1/orgs/<org>/requests/<request>` after interruption; a stranded `signing` request needs operator reconciliation. Required timestamp failure produces a failed record with no output. Offline keys cannot sign until release windows ship.
+
+For a TSA, add `[tsa]` with `url`, optional `tls_ca_file` (PEM), `signer_file` (pinned DER TSA certificate) and `anchors` (DER CA paths). The signer must have critical, exclusive timeStamping EKU. This configuration is independent of code-signing trust anchors. No real TSA is needed for tests: Compose includes a generated-key HTTPS OpenSSL TSA.
+
+```sh
+# Supply BRIGALOW_TOKEN securely in the environment, never as a command argument.
+brig sign --server https://signing.example --org <uuid> --project <uuid> \
+  --policy test --format cms --output artifact.cms artifact.bin
+```
+
+Use `--ca-file` for a private HTTPS CA. Results never overwrite existing files; a successful timestamp is also saved as `<output>.tsr` (DER token). The CLI receives and sends only public metadata and the artifact digest. CMS supports RSA/P-256; raw also supports Ed25519 over SHA-256 digest bytes, not Ed25519ph.
+
+For independent verification, `openssl pkeyutl -verify` checks raw signatures and `openssl cms -verify -binary -inform DER -content artifact.bin -in artifact.cms -CAfile test-ca.pem -purpose any` checks detached CMS. OpenSSL defaults CMS verification to S/MIME purpose; `-purpose any` avoids incorrectly requiring emailProtection on a codeSigning certificate. Brigalow itself requires codeSigning EKU. `openssl ts -verify -token_in` checks the timestamp against the signature bytes and configured TSA CA.

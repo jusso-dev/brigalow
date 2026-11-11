@@ -50,6 +50,18 @@ services:
       interval: 1s
       timeout: 3s
       retries: 30
+  tsa:
+    build:
+      context: .
+      dockerfile: TSA.Dockerfile
+    secrets: [server_key, server_cert, tsa_key, tsa_cert, tsa_ca]
+    ports: ["127.0.0.1::8443"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1',8443),2).close()"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
 secrets:
   postgres_password:
     file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/postgres_password
@@ -57,3 +69,10 @@ secrets:
     file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/server.key
   server_cert:
     file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/server.crt
+
+  tsa_key:
+    file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/tsa.key
+  tsa_cert:
+    file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/tsa.pem
+  tsa_ca:
+    file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/ca.crt

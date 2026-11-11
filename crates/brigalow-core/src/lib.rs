@@ -3,11 +3,13 @@
 //! This is a scaffold. See `docs/architecture.md` for the planned modules.
 
 pub mod audit;
+pub mod keys;
 pub mod rbac;
 
 /// What a signing policy or key is for. Release keys must never be used by
 /// test policies (see threat T7 in `docs/threat-model.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Purpose {
     Test,
     Release,
@@ -22,11 +24,13 @@ pub fn purpose_compatible(key: Purpose, policy: Purpose) -> bool {
 /// How far a certificate chain is trusted, as configured by the operator.
 /// Brigalow never decides on its own that something is publicly trusted
 /// (see `docs/decisions/0003-trust-tiers.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TrustTier {
     Lab,
     Private,
     Untrusted,
+    #[serde(rename = "external-ca")]
     ExternalCa,
 }
 

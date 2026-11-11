@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+brigalow-crypto = { path = "../brigalow-crypto" }
 brigalow-core = { path = "../brigalow-core" }
 brigalow-store = { path = "../brigalow-store" }
 axum = "0.8"

@@ -29,8 +29,8 @@ services:
       retries: 60
   softhsm:
     build:
-      context: .
-      dockerfile: SoftHSM.Dockerfile
+      context: ../..
+      dockerfile: deploy/dev/SoftHSM.Dockerfile
     command: ["sleep", "infinity"]
     tmpfs:
       - /var/lib/softhsm/tokens

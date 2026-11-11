@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/brigalow-core", "crates/brigalow-server", "crates/brigalow-store", "crates/brig"]
+members = ["crates/brigalow-core", "crates/brigalow-server", "crates/brigalow-store", "crates/brigalow-crypto", "crates/brig"]
 
 [workspace.package]
 version = "0.0.1"

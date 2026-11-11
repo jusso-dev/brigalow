@@ -1,0 +1,32 @@
+[package]
+name = "brigalow-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+[lints]
+workspace = true
+[features]
+integration = []
+pkcs11-tests = []
+[dependencies]
+brigalow-core = {path="../brigalow-core"}
+cryptoki = "0.12.1"
+sha2 = {version="0.10",features=["oid"]}
+rsa = {version="0.9",features=["sha2"]}
+p256 = {version="0.13",features=["ecdsa","pkcs8"]}
+ed25519-dalek = {version="2",features=["rand_core","pkcs8"]}
+signature = "2"
+rand = "0.8"
+der = {version="0.7",features=["alloc","derive","oid","pem"]}
+spki = {version="0.7",features=["alloc","pem"]}
+x509-cert = "0.2.5"
+webpki = {package="rustls-webpki",version="0.103",features=["ring"]}
+rustls-pki-types = "1"
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+[dev-dependencies]
+tempfile.workspace = true

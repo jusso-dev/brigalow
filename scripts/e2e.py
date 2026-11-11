@@ -122,7 +122,7 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
                 assert (Path(directory)/name).read_text() not in output, "AT-OPS-01 secret disclosure"
             assert "LAB MODE" in output
         print("AT-OPS-01: live health/debug responses and server logs contain no generated secrets")
-        run(compose + ["exec", "-T", "softhsm", "softhsm2-util", "--show-slots"])
+        run(compose + ["exec", "-T", "softhsm", "python3", "/hsm_test.py"])
     finally:
         # Only this harness's uniquely named resources. Data lives in tmpfs.
         subprocess.run(compose + ["down", "--remove-orphans", "--rmi", "local"], cwd=root, env=env, check=True)

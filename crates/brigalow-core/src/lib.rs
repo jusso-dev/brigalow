@@ -3,6 +3,7 @@
 //! This is a scaffold. See `docs/architecture.md` for the planned modules.
 
 pub mod audit;
+pub mod rbac;
 
 /// What a signing policy or key is for. Release keys must never be used by
 /// test policies (see threat T7 in `docs/threat-model.md`).

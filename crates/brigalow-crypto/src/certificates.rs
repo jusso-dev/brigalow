@@ -37,6 +37,14 @@ pub fn validate_chain(
         return Err(Error::Certificate);
     }
     let leaf = Certificate::from_der(&chain[0]).map_err(|_| Error::Certificate)?;
+    if leaf
+        .tbs_certificate
+        .get::<x509_cert::ext::pkix::BasicConstraints>()
+        .map_err(|_| Error::Certificate)?
+        .is_some_and(|(_, constraints)| constraints.ca)
+    {
+        return Err(Error::Certificate);
+    }
     let validity = &leaf.tbs_certificate.validity;
     if at < validity.not_before.to_unix_duration().as_secs()
         || at > validity.not_after.to_unix_duration().as_secs()
@@ -74,6 +82,14 @@ pub fn validate_chain(
     }
     let leaf_der = rustls_pki_types::CertificateDer::from(chain[0].as_slice());
     let end = webpki::EndEntityCert::try_from(&leaf_der).map_err(|_| Error::Certificate)?;
+    for certificate in chain.iter().skip(1) {
+        Certificate::from_der(certificate).map_err(|_| Error::Certificate)?;
+    }
+    // Without a configured anchor, no path can establish trust. In particular, do
+    // not treat a supplied self-signed root as an intermediate in an empty trust store.
+    if anchors.is_empty() {
+        return Ok(TrustTier::Untrusted);
+    }
     let intermediates: Vec<_> = chain
         .iter()
         .skip(1)

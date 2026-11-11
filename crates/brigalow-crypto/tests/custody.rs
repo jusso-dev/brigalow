@@ -160,6 +160,16 @@ fn exercise(backend: &dyn KeyBackend, algorithms: &[Algorithm]) {
                 certificates::validate_chain(&public, &chain, &[], now).unwrap(),
                 TrustTier::Untrusted
             );
+            let mut full_chain = chain.clone();
+            full_chain.push(anchors[0].clone());
+            assert_eq!(
+                certificates::validate_chain(&public, &full_chain, &[], now).unwrap(),
+                TrustTier::Untrusted
+            );
+            assert_eq!(
+                certificates::validate_chain(&public, &full_chain, &anchors, now).unwrap(),
+                TrustTier::Private
+            );
             assert!(
                 certificates::validate_chain(&public, &chain, &anchors, now + 86400 * 2).is_err()
             );

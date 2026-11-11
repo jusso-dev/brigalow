@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Phase 0 foundations implemented: config, health endpoint, tenant store, audit chain and offline verifier. Phase 1 adds OIDC, scoped tokens, sessions, RBAC and initial escaped administration pages. Phase 2 adds key backends, custodian lifecycle APIs, CSRs and validated certificate imports. Phase 3 adds immutable signing policies, durable signing intents, digest-only CLI requests, detached CMS and verified RFC 3161 timestamps. Phase 4 adds individual approvals, expiry, atomic release-window caps and signed notification webhooks. Phase 5 adds fail-closed signed gates and claim-bound DSSE provenance. Signed audit checkpoints remain planned.
+Status: Phase 0 foundations implemented: config, health endpoint, tenant store, audit chain and offline verifier. Phase 1 adds OIDC, scoped tokens, sessions, RBAC and initial escaped administration pages. Phase 2 adds key backends, custodian lifecycle APIs, CSRs and validated certificate imports. Phase 3 adds immutable signing policies, durable signing intents, digest-only CLI requests, detached CMS and verified RFC 3161 timestamps. Phase 4 adds individual approvals, expiry, atomic release-window caps and signed notification webhooks. Phase 5 adds fail-closed signed gates and claim-bound DSSE provenance. Phase 6 adds a digest-only client PKCS#11 module and GitHub OIDC action. Signed audit checkpoints remain planned.
 
 ## Components
 
@@ -35,6 +35,7 @@ Status: Phase 0 foundations implemented: config, health endpoint, tenant store, 
 | `brigalow-store` | Postgres persistence with `sqlx` migrations. Every tenant-owned table carries `org_id`; queries go through a tenant-scoped handle. |
 | `brigalow-server` | axum app, OIDC, RBAC, admin UI templates, webhook gates, metrics. |
 | `brig` | CLI client. |
+| `brigalow-pkcs11` | Client C ABI exposing one policy-bound RSA signing reference to native tools; no private material. |
 
 Phase 0 adds `brigalow-store`. Add `brigalow-crypto` when backend code first needs it. Key, policy and request tables currently contain tenant-linked metadata placeholders only; they confer no signing authority.
 

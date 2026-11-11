@@ -1,6 +1,7 @@
 # Disposable local test infrastructure. Run through scripts/e2e.sh.
 services:
   postgres:
+    networks: [default, tool-tests]
     image: postgres:16-bookworm
     environment:
       POSTGRES_DB: brigalow
@@ -40,6 +41,7 @@ services:
       timeout: 3s
       retries: 30
   idp:
+    networks: [default, tool-tests]
     build:
       context: .
       dockerfile: IdP.Dockerfile
@@ -51,6 +53,7 @@ services:
       timeout: 3s
       retries: 30
   tsa:
+    networks: [default, tool-tests]
     build:
       context: .
       dockerfile: TSA.Dockerfile
@@ -61,6 +64,26 @@ services:
       interval: 1s
       timeout: 3s
       retries: 30
+
+  tools:
+    networks: [tool-tests]
+    profiles: [tools]
+    build:
+      context: ../..
+      dockerfile: deploy/dev/Tools.Dockerfile
+    volumes:
+      - ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}:/test-secrets:ro
+    environment:
+      BRIGALOW_TEST_SECRETS: /test-secrets
+      BRIGALOW_TEST_DB_HOST: postgres
+      BRIGALOW_TEST_DB_PORT: "5432"
+      BRIGALOW_TEST_DB_CA_FILE: /test-secrets/ca.crt
+      BRIGALOW_TEST_ADMIN_PASSWORD_FILE: /test-secrets/postgres_password
+      BRIGALOW_TEST_APP_PASSWORD_FILE: /test-secrets/app_password
+      BRIGALOW_TEST_IDP_URL: https://idp:8443
+      BRIGALOW_TEST_TSA_URL: https://tsa:8443
+      BRIGALOW_TEST_TLS_CERT_FILE: /test-secrets/server.crt
+      BRIGALOW_TEST_TLS_KEY_FILE: /test-secrets/server.key
 
 secrets:
   postgres_password:
@@ -76,3 +99,8 @@ secrets:
     file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/tsa.pem
   tsa_ca:
     file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/ca.crt
+
+networks:
+  default: {}
+  tool-tests:
+    internal: true

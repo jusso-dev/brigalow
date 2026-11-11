@@ -1,0 +1,28 @@
+[package]
+name = "brigalow-pkcs11"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+[lib]
+crate-type = ["cdylib", "rlib"]
+# The only unsafe boundary is the PKCS#11 C ABI module; domain/transport stay safe.
+[lints.rust]
+unsafe_code = "deny"
+[dependencies]
+brigalow-core = { path = "../brigalow-core" }
+cryptoki-sys = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+toml = "0.8"
+sha2 = "0.10"
+rsa = "0.9"
+der = "0.7"
+x509-cert = "0.2"
+zeroize = "1"
+[dev-dependencies]
+cryptoki = "0.12.1"
+tempfile.workspace = true

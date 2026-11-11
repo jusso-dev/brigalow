@@ -1,0 +1,47 @@
+name: Brigalow digest signing
+description: Hash locally and sign through a self-hosted Brigalow policy using GitHub OIDC
+inputs:
+  server:
+    description: HTTPS Brigalow origin
+    required: true
+  org:
+    description: Organisation UUID
+    required: true
+  project:
+    description: Project UUID
+    required: true
+  policy:
+    description: Signing policy name or UUID
+    required: true
+  file:
+    description: Local artifact path
+    required: true
+  output:
+    description: New signature output path
+    required: true
+  format:
+    description: raw or cms
+    default: raw
+  ca-file:
+    description: Optional PEM CA for the Brigalow HTTPS server
+    default: ''
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        BRIGALOW_ACTION_PATH: ${{ github.action_path }}
+        BRIGALOW_INPUT_SERVER: ${{ inputs.server }}
+        BRIGALOW_INPUT_ORG: ${{ inputs.org }}
+        BRIGALOW_INPUT_PROJECT: ${{ inputs.project }}
+        BRIGALOW_INPUT_POLICY: ${{ inputs.policy }}
+        BRIGALOW_INPUT_FILE: ${{ inputs.file }}
+        BRIGALOW_INPUT_OUTPUT: ${{ inputs.output }}
+        BRIGALOW_INPUT_FORMAT: ${{ inputs.format }}
+        BRIGALOW_INPUT_CA_FILE: ${{ inputs.ca-file }}
+      run: |
+        set -euo pipefail
+        build_dir="$RUNNER_TEMP/brigalow-action-build"
+        cargo +stable build --locked --manifest-path "$BRIGALOW_ACTION_PATH/../../Cargo.toml" -p brig --target-dir "$build_dir"
+        export BRIGALOW_BINARY="$build_dir/debug/brig"
+        python3 "$BRIGALOW_ACTION_PATH/sign.py"

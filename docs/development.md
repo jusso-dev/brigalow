@@ -109,3 +109,8 @@ After approvals, the request durably enters `gating`. Gates execute in order and
 `examples/gates/hash_validation.py` demonstrates the signed protocol with a deterministic locally rebuilt fixture; `--fixture` emits its reproducible bytes. Run it only locally with generated TLS/secret files. This is not a general-purpose build service. A real gate must pin source/build inputs independently, isolate untrusted build execution, and authorise organisation/project/policy/verified identity for its own checks. Do not execute request-provided commands or fetch arbitrary URLs.
 
 Policy `attestation: true` requires verified workload source/builder claims and returns DSSE provenance signed by the policy key. See [the v1 schema and limitations](attestation-v1.md). No SLSA assurance level is claimed. `brig sign` saves an additional `.dsse.json` file. A crash in `gating` or `signing` leaves durable evidence and never triggers automatic re-execution; reconcile before issuing a new request.
+
+
+## Native tools and GitHub Actions (Phase 6)
+
+See [PKCS#11 recipes](integrations/pkcs11.md) and [the OIDC action](integrations/github-actions.md). The full acceptance harness builds pinned cosign/jsign plus distribution OpenSSL, osslsigncode and GPG in a disposable Linux image. Runtime tools use an internal Compose network without external egress. For focused iteration only, use `scripts/e2e.sh --context orbstack --tools-only`; this does not replace the full phase gate. No Node toolchain is required.

@@ -13,6 +13,7 @@ import urllib.error
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--context", required=True, help="Explicit Docker context, e.g. orbstack or default (CI)")
+parser.add_argument("--tools-only", action="store_true", help="Focused native tool regression run; full CI uses the default")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 project = "brigalow-test-" + secrets.token_hex(6)
@@ -37,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
             "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     openssl("req", "-new", "-newkey", "rsa:3072", "-nodes", "-keyout", server_key,
             "-out", csr, "-subj", "/CN=localhost")
-    extensions.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost\n")
+    extensions.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost,DNS:postgres,DNS:idp,DNS:tsa\n")
     openssl("x509", "-req", "-in", csr, "-CA", ca_cert, "-CAkey", ca_key, "-CAcreateserial",
             "-out", server_cert, "-days", "1", "-extfile", str(extensions))
     tsa_key, tsa_csr, tsa_cert = [str(Path(directory)/name) for name in ("tsa.key","tsa.csr","tsa.pem")]
@@ -62,7 +63,12 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
         env["BRIGALOW_TEST_TSA_URL"] = "https://" + tsa_address
         run(["cargo", "build", "--locked", "-p", "brig"])
         run(["cargo", "test", "--locked", "-p", "brigalow-store", "--features", "integration"])
-        run(["cargo", "test", "--locked", "--workspace", "--features", "integration"])
+        if not args.tools_only:
+            run(["cargo", "test", "--locked", "--workspace", "--features", "integration"])
+        run(compose + ["build", "tools"])
+        run(compose + ["run", "--rm", "tools"])
+        if args.tools_only:
+            raise SystemExit(0)
         # Independently invoke the public CLI on the database-backed export.
         export = Path(directory)/"audit.jsonl"
         verify = ["cargo", "run", "--locked", "--quiet", "-p", "brig", "--", "audit", "verify"]
@@ -137,4 +143,4 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
         run(compose + ["exec", "-T", "softhsm", "python3", "/hsm_test.py"])
     finally:
         # Only this harness's uniquely named resources. Data lives in tmpfs.
-        subprocess.run(compose + ["down", "--remove-orphans", "--rmi", "local"], cwd=root, env=env, check=True)
+        subprocess.run(compose + ["--profile", "tools", "down", "--remove-orphans", "--rmi", "local"], cwd=root, env=env, check=True)

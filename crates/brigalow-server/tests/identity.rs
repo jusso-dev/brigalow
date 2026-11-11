@@ -36,7 +36,11 @@ struct Fixture {
 }
 async fn fixture() -> Fixture {
     let base = PgConnectOptions::new()
-        .host("127.0.0.1")
+        .host(
+            std::env::var("BRIGALOW_TEST_DB_HOST")
+                .as_deref()
+                .unwrap_or("127.0.0.1"),
+        )
         .port(
             std::env::var("BRIGALOW_TEST_DB_PORT")
                 .expect("run scripts/e2e.sh")
@@ -2501,6 +2505,288 @@ async fn at_gate_01_02_and_att_01_signed_checks_and_claim_bound_provenance() {
             .0,
         403
     );
+    f.store.close().await;
+    f.admin.close().await;
+}
+
+#[cfg(feature = "tool-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn at_int_01_native_tools_through_remote_pkcs11() {
+    use brigalow_core::{keys::KeyRecord, policy::Policy};
+    use std::io::BufRead;
+    assert_eq!(
+        std::env::consts::OS,
+        "linux",
+        "run the disposable tools container"
+    );
+    let mut f = fixture().await;
+    let org = f.orgs[0];
+    let project = f.objects[0][0];
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let custodian = role_session(&f, "tool-custodian", vec![Role::KeyCustodian]).await;
+    let admin = login(&f, org).await;
+    let result = json_as(
+        &f,
+        &format!("/v1/orgs/{org}/projects/{project}/keys"),
+        &custodian,
+        json!({"algorithm":"rsa3072","purpose":"test","offline":false}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let key: KeyRecord = serde_json::from_str(&result.2).unwrap();
+    let result = json_as(
+        &f,
+        &format!("/v1/orgs/{org}/keys/{}/csr", key.key.id),
+        &custodian,
+        json!({"subject":"CN=Brigalow ephemeral tool signer"}),
+    )
+    .await;
+    assert_eq!(result.0, 200);
+    let csr: Value = serde_json::from_str(&result.2).unwrap();
+    std::fs::write(d.join("key.csr"), csr["csr"].as_str().unwrap()).unwrap();
+    std::fs::write(d.join("leaf.ext"),"basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n").unwrap();
+    let secrets = std::path::PathBuf::from(std::env::var("BRIGALOW_TEST_SECRETS").unwrap());
+    let out = std::process::Command::new("openssl")
+        .current_dir(d)
+        .args([
+            "x509",
+            "-req",
+            "-in",
+            "key.csr",
+            "-CA",
+            secrets.join("ca.crt").to_str().unwrap(),
+            "-CAkey",
+            secrets.join("ca.key").to_str().unwrap(),
+            "-set_serial",
+            "99",
+            "-days",
+            "1",
+            "-extfile",
+            "leaf.ext",
+            "-out",
+            "leaf.pem",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(std::process::Command::new("openssl")
+        .current_dir(d)
+        .args(["x509", "-in", "leaf.pem", "-outform", "DER", "-out", "leaf.der"])
+        .status()
+        .unwrap()
+        .success());
+    let chain = vec![
+        std::fs::read(d.join("leaf.der")).unwrap(),
+        std::fs::read(secrets.join("ca.der")).unwrap(),
+    ];
+    let valid = brigalow_crypto::certificates::validate_chain(
+        &key.public_key,
+        &chain,
+        &[],
+        auth::now() as u64,
+    );
+    let verification = std::process::Command::new("openssl")
+        .current_dir(d)
+        .args([
+            "verify",
+            "-CAfile",
+            secrets.join("ca.crt").to_str().unwrap(),
+            "-purpose",
+            "any",
+            "leaf.pem",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        valid.is_ok(),
+        "leaf validation failed; OpenSSL: {} {}",
+        String::from_utf8_lossy(&verification.stdout),
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/keys/{}/certificate", key.key.id),
+            &custodian,
+            json!({"chain":chain})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/keys/{}/activate", key.key.id),
+            &custodian,
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    let result=json_as(&f,&format!("/v1/orgs/{org}/projects/{project}/policies"),&admin,json!({"name":"tools","key":key.key.id,"purpose":"test","claims":{},"algorithms":["rsa3072"],"timestamp":"disabled"})).await;
+    assert_eq!(result.0, 201);
+    let policy: Policy = serde_json::from_str(&result.2).unwrap();
+    let result = json_as(
+        &f,
+        &format!("/v1/orgs/{org}/tokens"),
+        &admin,
+        json!({"project":project,"policy":policy.id,"expires_at":auth::now()+1800}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let token: Value = serde_json::from_str(&result.2).unwrap();
+    let token = token["token"].as_str().unwrap();
+    let mut config = f.identity.config.clone();
+    for authority in config.authorities.iter_mut().filter(|a| a.org_id == org) {
+        for workload in &mut authority.workloads {
+            workload.policy = policy.id;
+        }
+    }
+    f.identity = Identity::new(config, Mode::Lab).unwrap();
+    f.router = application(AppState {
+        store: f.store.clone(),
+        mode: Mode::Lab,
+        identity: Some(f.identity.clone()),
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+        notifications: Default::default(),
+        gates: Default::default(),
+    });
+    let oidc=mint(&f,json!({"aud":format!("brigalow:{org}"),"repository":"acme/app","ref":"refs/heads/main","environment":"release","workflow":"build"}),false,"RS256").await;
+    let mint_credential = auth::random_secret();
+    let expected = mint_credential.clone();
+    f.router =
+        f.router.route(
+            "/github-oidc",
+            axum::routing::get(
+                move |headers: HeaderMap,
+                      axum::extract::Query(query): axum::extract::Query<
+                    BTreeMap<String, String>,
+                >| {
+                    let token = oidc.clone();
+                    let expected = expected.clone();
+                    async move {
+                        if headers.get("authorization").and_then(|v| v.to_str().ok())
+                            != Some(format!("Bearer {expected}").as_str())
+                            || query.get("audience") != Some(&format!("brigalow:{org}"))
+                        {
+                            return (StatusCode::FORBIDDEN, axum::Json(json!({})));
+                        }
+                        (StatusCode::OK, axum::Json(json!({"value":token})))
+                    }
+                },
+            ),
+        );
+    let captured = Arc::new(std::sync::Mutex::new(vec![]));
+    let capture = captured.clone();
+    let app = f.router.clone().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let capture = capture.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let bytes = axum::body::to_bytes(body, 65536).await.unwrap();
+                if parts.uri.path().ends_with("/sign-requests") {
+                    capture.lock().unwrap().push(bytes.to_vec());
+                }
+                next.run(Request::from_parts(parts, Body::from(bytes)))
+                    .await
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut proxy = ChildGuard(
+        std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deploy/dev/test_proxy.py"
+            ))
+            .arg(port.to_string())
+            .arg(std::env::var("BRIGALOW_TEST_TLS_CERT_FILE").unwrap())
+            .arg(std::env::var("BRIGALOW_TEST_TLS_KEY_FILE").unwrap())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut port = String::new();
+    std::io::BufReader::new(proxy.0.stdout.take().unwrap())
+        .read_line(&mut port)
+        .unwrap();
+    std::fs::write(d.join("provider.toml"),format!("server='https://127.0.0.1:{}'\norg='{org}'\nproject='{project}'\npolicy='{}'\nca_file='{}'\n",port.trim(),policy.id,secrets.join("ca.crt").display())).unwrap();
+    std::fs::write(d.join("public.der"), &key.public_key).unwrap();
+    let out = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/dev/test_tools.py"
+        ))
+        .arg(d)
+        .arg(secrets.join("ca.crt"))
+        .env("BRIGALOW_PKCS11_CONFIG", d.join("provider.toml"))
+        .env("BRIGALOW_TOKEN", token)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "tool acceptance failed: {} {}",
+        String::from_utf8_lossy(&out.stdout).replace(token, "[REDACTED]"),
+        String::from_utf8_lossy(&out.stderr).replace(token, "[REDACTED]")
+    );
+    let action = std::process::Command::new("python3")
+        .arg("/work/actions/sign/sign.py")
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            format!("https://127.0.0.1:{}/github-oidc", port.trim()),
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", &mint_credential)
+        .env("SSL_CERT_FILE", secrets.join("ca.crt"))
+        .env("BRIGALOW_BINARY", "/work/target/debug/brig")
+        .env(
+            "BRIGALOW_INPUT_SERVER",
+            format!("https://127.0.0.1:{}", port.trim()),
+        )
+        .env("BRIGALOW_INPUT_ORG", org.to_string())
+        .env("BRIGALOW_INPUT_PROJECT", project.to_string())
+        .env("BRIGALOW_INPUT_POLICY", policy.id.to_string())
+        .env("BRIGALOW_INPUT_FORMAT", "raw")
+        .env("BRIGALOW_INPUT_OUTPUT", d.join("action.sig"))
+        .env("BRIGALOW_INPUT_FILE", d.join("artifact.bin"))
+        .env("BRIGALOW_INPUT_CA_FILE", secrets.join("ca.crt"))
+        .output()
+        .unwrap();
+    assert!(
+        action.status.success(),
+        "action wrapper failed (diagnostics withheld)"
+    );
+    assert!(std::process::Command::new("openssl")
+        .current_dir(d)
+        .args([
+            "dgst",
+            "-sha256",
+            "-verify",
+            "public.pem",
+            "-signature",
+            "action.sig",
+            "artifact.bin"
+        ])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    {
+        let bodies = captured.lock().unwrap();
+        assert!(bodies.len() >= 5);
+        for body in bodies.iter() {
+            assert!(body.len() < 1024);
+            let value: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(value["digest"].as_array().unwrap().len(), 32);
+            assert!(value.get("artifact").is_none());
+        }
+    }
+    server.abort();
     f.store.close().await;
     f.admin.close().await;
 }

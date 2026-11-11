@@ -21,6 +21,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: GitHub OIDC wrapper tests
+        run: python3 actions/sign/test_sign.py
       - name: Test
         run: cargo test --locked --workspace
       - name: Compose acceptance tests

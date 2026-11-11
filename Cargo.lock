@@ -255,6 +255,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "brigalow-pkcs11"
+version = "0.0.1"
+dependencies = [
+ "brigalow-core",
+ "cryptoki",
+ "cryptoki-sys",
+ "der 0.7.10",
+ "reqwest",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml",
+ "uuid",
+ "x509-cert",
+ "zeroize",
+]
+
+[[package]]
 name = "brigalow-server"
 version = "0.0.1"
 dependencies = [
@@ -2250,6 +2270,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",

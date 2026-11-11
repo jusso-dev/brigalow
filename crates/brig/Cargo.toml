@@ -11,3 +11,8 @@ workspace = true
 
 [dependencies]
 brigalow-core = { path = "../brigalow-core" }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+uuid.workspace = true

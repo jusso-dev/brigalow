@@ -1,6 +1,6 @@
 # Architecture
 
-Status: design for the build. Nothing here is implemented yet unless the code says so.
+Status: Phase 0 in progress. The audit chain and offline verifier are implemented; other components remain planned unless the code says so.
 
 ## Components
 
@@ -57,7 +57,9 @@ submitted -> authorised -> (awaiting_approval) -> (gating) -> signing -> signed
 ## Audit chain
 
 - Each entry: `seq`, `org_id`, `at`, `actor`, `action`, `subject`, `details` (JSON), `prev_hash`, `entry_hash = SHA-256(canonical(entry without entry_hash))`.
-- Periodic checkpoint: `{seq, entry_hash}` signed by a dedicated audit key held in a backend.
+- Encoding v1 uses RFC 8785 canonical JSON, lowercase hex SHA-256, Unix milliseconds, sequence numbers starting at 1 and an all-zero genesis hash. Each export contains one organisation. JSON numbers must be integers within ±(2^53−1); use strings for larger values.
+- Chain verification detects altered entries, reordering and interior deletion. Without an independently retained head or signed checkpoint it cannot detect suffix truncation or a fully rewritten chain.
+- Periodic checkpoint (planned): `{seq, entry_hash}` signed by a dedicated audit key held in a backend.
 - `brig audit verify <export.jsonl>` re-computes the chain and checks checkpoint signatures offline.
 - The table is insert-only for the app's database role (no UPDATE or DELETE grants).
 

@@ -1,6 +1,6 @@
 # Local development
 
-Phase 0 provides a development server, a tenant store and an offline audit verifier. It cannot authenticate users or sign artifacts. Do not deploy it to production.
+Phase 0 provides a development server, a tenant store and an offline audit verifier. It authenticates users and workloads but cannot yet sign artifacts. Do not deploy it to production.
 
 ## Automated acceptance run
 
@@ -12,7 +12,7 @@ scripts/e2e.sh --context orbstack
 # scripts/e2e.sh --context default
 ```
 
-The harness uses random Compose project names and loopback-only database ports. All credentials, TLS keys, test records and tokens are disposable. Its `finally` cleanup removes only its own containers, network, locally built SoftHSM image and temporary files; database/token data lives in tmpfs. SoftHSM2 is an in-process PKCS#11 library, so the container provides the test environment, not a remote HSM API. Token/key generation is Phase 2. Mock IdP/JWKS and TSA services will be added with the features that use them.
+The harness uses random Compose project names and loopback-only database ports. All credentials, TLS keys, test records and tokens are disposable. Its `finally` cleanup removes only its own containers, network, locally built SoftHSM image and temporary files; database/token data lives in tmpfs. SoftHSM2 is an in-process PKCS#11 library, so the container provides the test environment, not a remote HSM API. Token/key generation is Phase 2. The harness includes an HTTPS test IdP/JWKS service; a test TSA arrives with signing.
 
 `cargo test --workspace` runs pure/CLI/config/redaction tests. `--features integration` additionally requires the harness environment and never silently skips missing infrastructure. CI runs format, clippy (including integration code), unit tests, Compose acceptance tests and a separate full-history secret scan. All Actions are SHA-pinned and runners are GitHub-hosted.
 
@@ -44,10 +44,20 @@ Provision a separate login named `brigalow_runtime`, with membership in `brigalo
 cargo run -p brigalow-server
 ```
 
-`GET /healthz` reports `status`, `mode` and `signing_available: false`. There is no debug/config endpoint or tenant HTTP API. Shutdown handles SIGTERM and Ctrl-C. Runtime database failure returns 503. Logs accept application targets only; `RUST_LOG` cannot expose dependency debug output.
+`GET /healthz` reports `status`, `mode` and `signing_available: false`. There is no debug/config endpoint. Tenant APIs require a valid session, scoped API token or verified workload identity. Shutdown handles SIGTERM and Ctrl-C. Runtime database failure returns 503. Logs accept application targets only; `RUST_LOG` cannot expose dependency debug output.
 
 ## Audit format and limits
 
 Each organisation has its own sequence starting at 1, an all-zero genesis hash, and RFC 8785 canonical JSON hashed with SHA-256. Hash input is the entire entry except `entry_hash`. `at` is Unix milliseconds; details must use exact JSON integers within ±(2^53−1), strings for larger numbers and no floating-point values. Hashes use lowercase hexadecimal.
 
 The store serialises appends with a transaction advisory lock. Project creation and its audit entry commit together. Export through the tenant handle's bounded `audit_page` method, in sequence order, one JSON object per line. Verify with `brig audit verify <export.jsonl>`. CLI lines are limited to 1 MiB; empty or malformed exports fail. A hash chain alone does not authenticate its final head or detect suffix truncation/full replacement; signed checkpoints are still pending.
+
+## Identity setup (Phase 1)
+
+Set `BRIGALOW_IDENTITY_FILE` to an operator-owned JSON document with `public_url` (the HTTPS origin of Brigalow, no path), optional `ca_file` (PEM CA for a private IdP) and `authorities`. Each authority contains `org_id`, unique `name`, exact `issuer`, `jwks_url`, optional `human`, and `workloads`. All endpoint URLs require HTTPS and verified certificates; put the HTTP listener behind your TLS reverse proxy. Do not expose the test IdP outside the disposable test harness.
+
+Human settings: `client_id`, `authorization_url`, `token_url`, and `group_roles` mapping exact IdP group names to `org_admin`, `key_custodian`, `project_admin`, `approver`, `submitter` or `auditor`. Register a public OIDC client with S256 PKCE and exact redirect `https://<brigalow-origin>/auth/<org>/<name>/callback`. Enter through `/auth/<org>/<name>/login`. The explicit Continue step preserves Strict cookie semantics. No group match means no access. No implicit administrator or bootstrap authentication bypass exists; provision organisations with the owner tooling first.
+
+Each workload rule has `project`, `policy` and non-empty `claims` mapping verified claim names to exact string values. GitHub examples use `repository`, `ref`, `workflow` and `environment`; use the actual issuer's claim names. Workload audience must be `brigalow:<org>`, with a maximum one-hour lifetime. Configuration is loaded at startup; changing trusted issuers requires restart. Initial identity support uses RS256 and public-client PKCE.
+
+JSON APIs: `GET /v1/orgs/<org>/{projects,keys,policies,requests}/<id>`; `POST /v1/orgs/<org>/projects` with name and unique request_id; `POST /v1/orgs/<org>/tokens` with project, policy and expires_at (Unix seconds); `DELETE /v1/orgs/<org>/tokens/<id>`. Token issuance requires an org admin; credentials are returned only once. Cookie-authenticated mutations require the configured Origin and `X-CSRF-Token`; HTML forms carry the same session CSRF value. Bearer API tokens can only read/submit within their binding and cannot administer projects or credentials. Signing itself arrives in Phase 3.

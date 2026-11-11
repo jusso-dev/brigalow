@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Phase 0 foundations implemented: config, health endpoint, tenant store, audit chain and offline verifier. Identity, signing, approvals, gates, UI and signed audit checkpoints remain planned.
+Status: Phase 0 foundations implemented: config, health endpoint, tenant store, audit chain and offline verifier. Phase 1 adds OIDC, scoped tokens, sessions, RBAC and initial escaped administration pages. Signing, approvals, gates and signed audit checkpoints remain planned.
 
 ## Components
 

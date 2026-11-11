@@ -47,6 +47,9 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
         env["BRIGALOW_TEST_DB_PORT"] = address.rsplit(":", 1)[1]
         env["BRIGALOW_TEST_ADMIN_PASSWORD_FILE"] = str(Path(directory) / "postgres_password")
         env["BRIGALOW_TEST_APP_PASSWORD_FILE"] = str(Path(directory) / "app_password")
+        idp_address = run(compose + ["port", "idp", "8443"], capture_output=True, text=True).stdout.strip()
+        env["BRIGALOW_TEST_IDP_URL"] = "https://" + idp_address
+        run(["cargo", "test", "--locked", "-p", "brigalow-store", "--features", "integration"])
         run(["cargo", "test", "--locked", "--workspace", "--features", "integration"])
         # Independently invoke the public CLI on the database-backed export.
         export = Path(directory)/"audit.jsonl"

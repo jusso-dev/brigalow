@@ -35,11 +35,19 @@ async fn at_ten_01_store_isolation_and_atomic_audit() {
         std::fs::read_to_string(std::env::var("BRIGALOW_TEST_APP_PASSWORD_FILE").unwrap()).unwrap();
     let sql: String = sqlx::query_scalar("SELECT format('CREATE ROLE brigalow_runtime LOGIN IN ROLE brigalow_app PASSWORD %L', $1::text)")
         .bind(&password).fetch_one(&admin).await.unwrap();
-    sqlx::query(&sql)
-        .execute(&admin)
-        .await
-        .map_err(|_| "cannot provision test login")
-        .unwrap();
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='brigalow_runtime')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    if !exists {
+        sqlx::query(&sql)
+            .execute(&admin)
+            .await
+            .map_err(|_| "cannot provision test login")
+            .unwrap();
+    }
     let app_options = options("brigalow_runtime", "BRIGALOW_TEST_APP_PASSWORD_FILE");
     let store = Store::connect(app_options.clone()).await.unwrap();
     assert!(matches!(

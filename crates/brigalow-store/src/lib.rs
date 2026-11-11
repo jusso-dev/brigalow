@@ -8,6 +8,8 @@ use sqlx::{
 use std::time::Duration;
 use uuid::Uuid;
 
+pub mod identity;
+
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 // Do not expose driver errors: Postgres errors may contain submitted data or credentials.
@@ -15,6 +17,8 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 pub enum Error {
     #[error("database operation failed")]
     Database,
+    #[error("request already used")]
+    Conflict,
     #[error("runtime database role must be restricted and inherit brigalow_app")]
     UnsafeRole,
     #[error("invalid audit event")]

@@ -1,6 +1,8 @@
 use brigalow_server::{
+    application,
+    auth::{Identity, IdentityConfig},
     config::{Config, Mode},
-    router,
+    AppState,
 };
 use brigalow_store::Store;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
@@ -24,9 +26,29 @@ async fn run() -> Result<(), &'static str> {
         tracing::warn!("LAB MODE: test use only; release signing unavailable");
     }
     tracing::info!(address = %listener.local_addr().map_err(|_| "cannot inspect listener")?, mode = ?config.mode, "server listening; signing unavailable in Phase 0");
-    let result = axum::serve(listener, router(store.clone(), config.mode))
-        .with_graceful_shutdown(shutdown())
-        .await;
+    let identity = match std::env::var("BRIGALOW_IDENTITY_FILE") {
+        Ok(path) => {
+            let bytes = std::fs::read(path).map_err(|_| "cannot read identity configuration")?;
+            let settings: IdentityConfig =
+                serde_json::from_slice(&bytes).map_err(|_| "invalid identity configuration")?;
+            Some(
+                Identity::new(settings, config.mode)
+                    .map_err(|_| "invalid identity configuration")?,
+            )
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err("invalid identity configuration path"),
+    };
+    let result = axum::serve(
+        listener,
+        application(AppState {
+            store: store.clone(),
+            mode: config.mode,
+            identity,
+        }),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await;
     store.close().await;
     result.map_err(|_| "HTTP server stopped unexpectedly")
 }

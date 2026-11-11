@@ -39,6 +39,17 @@ services:
       interval: 1s
       timeout: 3s
       retries: 30
+  idp:
+    build:
+      context: .
+      dockerfile: IdP.Dockerfile
+    secrets: [server_key, server_cert]
+    ports: ["127.0.0.1::8443"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1',8443),2).close()"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
 secrets:
   postgres_password:
     file: ${BRIGALOW_TEST_SECRETS:?run scripts/e2e.sh}/postgres_password

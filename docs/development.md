@@ -114,3 +114,8 @@ Policy `attestation: true` requires verified workload source/builder claims and 
 ## Native tools and GitHub Actions (Phase 6)
 
 See [PKCS#11 recipes](integrations/pkcs11.md) and [the OIDC action](integrations/github-actions.md). The full acceptance harness builds pinned cosign/jsign plus distribution OpenSSL, osslsigncode and GPG in a disposable Linux image. Runtime tools use an internal Compose network without external egress. For focused iteration only, use `scripts/e2e.sh --context orbstack --tools-only`; this does not replace the full phase gate. No Node toolchain is required.
+
+
+## Optional private CA (Phase 7)
+
+See [private CA operations](private-ca.md). `brigalow-ca` uses a separate restricted CA login and HSM issuer token; it does not run inside the HTTP service. The full Compose harness tests its real command across process restarts and verifies certificates/CRLs with OpenSSL. No root private key is loaded by Brigalow.

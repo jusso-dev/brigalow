@@ -2790,3 +2790,37 @@ async fn at_int_01_native_tools_through_remote_pkcs11() {
     f.store.close().await;
     f.admin.close().await;
 }
+
+#[cfg(feature = "tool-tests")]
+#[tokio::test]
+async fn at_ca_01_02_operator_tool_restart_and_publication() {
+    let f = fixture().await;
+    let user = format!("ca_tool_{}", Uuid::new_v4().simple());
+    let secret =
+        std::fs::read_to_string(std::env::var("BRIGALOW_TEST_APP_PASSWORD_FILE").unwrap()).unwrap();
+    let sql: String = sqlx::query_scalar(
+        "SELECT format('CREATE ROLE %I LOGIN IN ROLE brigalow_ca PASSWORD %L',$1::text,$2::text)",
+    )
+    .bind(&user)
+    .bind(&secret)
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    sqlx::query(&sql)
+        .execute(&f.admin)
+        .await
+        .map_err(|_| "cannot create ephemeral CA login")
+        .unwrap();
+    let result = std::process::Command::new("python3")
+        .arg("/work/deploy/dev/test_ca.py")
+        .arg(f.orgs[0].to_string())
+        .arg(user)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "CA operator CLI failed; diagnostics withheld"
+    );
+    f.store.close().await;
+    f.admin.close().await;
+}

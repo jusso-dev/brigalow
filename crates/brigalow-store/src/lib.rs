@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub mod approvals;
 pub mod identity;
 pub mod keys;
+pub mod private_ca;
 pub mod signing;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

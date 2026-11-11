@@ -9,3 +9,4 @@ env = os.environ.copy()
 env["BRIGALOW_TEST_HSM_PIN"] = pin
 env["BRIGALOW_TEST_HSM_MODULE"] = "/usr/lib/softhsm/libsofthsm2.so"
 subprocess.run(["/crypto-tests", "--nocapture"], env=env, check=True)
+subprocess.run(["/ca-tests", "--nocapture"], env=env, check=True)

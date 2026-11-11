@@ -1,6 +1,6 @@
 # PKCS#11 client provider
 
-Status: Phase 6 implementation under acceptance testing. Supported initial signing profile: RSA-3072 and SHA-256 on Linux. This client module is distinct from the server's HSM backend. It stores no private key, creates no certificate, and claims no hardware assurance or public trust. Use an HSM-backed server key for real custody; software remains lab-only.
+Status: Phase 6 local and hosted acceptance passed. Supported initial signing profile: RSA-3072 and SHA-256 on Linux. This client module is distinct from the server's HSM backend. It stores no private key, creates no certificate, and claims no hardware assurance or public trust. Use an HSM-backed server key for real custody; software remains lab-only.
 
 Build with `cargo build --locked -p brigalow-pkcs11`. The module is `target/debug/libbrigalow_pkcs11.so` on Linux. Point `BRIGALOW_PKCS11_CONFIG` to a non-secret TOML file:
 

@@ -1,5 +1,6 @@
 [package]
 name = "brigalow-server"
+default-run = "brigalow-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +11,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+der = { version = "0.7", features = ["pem"] }
+x509-cert = "0.2.5"
 time = {version="0.3",features=["formatting"]}
 brigalow-crypto = { path = "../brigalow-crypto" }
 brigalow-core = { path = "../brigalow-core" }

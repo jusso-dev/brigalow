@@ -3,6 +3,7 @@ pub mod attestation;
 pub mod certificates;
 pub mod cms;
 pub mod pkcs11;
+pub mod private_ca;
 pub mod software;
 pub mod timestamp;
 pub use brigalow_core::keys::{Algorithm, DigestAlgorithm, Key};

@@ -37,6 +37,32 @@ pub fn validate_chain(
         return Err(Error::Certificate);
     }
     let leaf = Certificate::from_der(&chain[0]).map_err(|_| Error::Certificate)?;
+    let validity = &leaf.tbs_certificate.validity;
+    if at < validity.not_before.to_unix_duration().as_secs()
+        || at > validity.not_after.to_unix_duration().as_secs()
+    {
+        return Err(Error::Certificate);
+    }
+    let (_, eku) = leaf
+        .tbs_certificate
+        .get::<x509_cert::ext::pkix::ExtendedKeyUsage>()
+        .map_err(|_| Error::Certificate)?
+        .ok_or(Error::Certificate)?;
+    if !eku
+        .0
+        .contains(&"1.3.6.1.5.5.7.3.3".parse().expect("code-signing OID"))
+    {
+        return Err(Error::Certificate);
+    }
+    if let Some((_, usage)) = leaf
+        .tbs_certificate
+        .get::<x509_cert::ext::pkix::KeyUsage>()
+        .map_err(|_| Error::Certificate)?
+    {
+        if !usage.digital_signature() {
+            return Err(Error::Certificate);
+        }
+    }
     if leaf
         .tbs_certificate
         .subject_public_key_info

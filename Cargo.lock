@@ -203,8 +203,12 @@ name = "brig"
 version = "0.0.1"
 dependencies = [
  "brigalow-core",
+ "futures-util",
+ "reqwest",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 
@@ -225,11 +229,15 @@ name = "brigalow-crypto"
 version = "0.0.1"
 dependencies = [
  "brigalow-core",
+ "cmpv2",
+ "cms",
  "cryptoki",
  "der 0.7.10",
  "ed25519-dalek 2.2.0",
+ "futures-util",
  "p256 0.13.2",
  "rand 0.8.8",
+ "reqwest",
  "rsa",
  "rustls-pki-types",
  "rustls-webpki",
@@ -242,6 +250,7 @@ dependencies = [
  "thiserror 2.0.21",
  "uuid",
  "x509-cert",
+ "x509-tsp",
 ]
 
 [[package]]
@@ -254,6 +263,8 @@ dependencies = [
  "brigalow-core",
  "brigalow-crypto",
  "brigalow-store",
+ "cms",
+ "der 0.7.10",
  "futures-util",
  "http-body-util",
  "jsonwebtoken",
@@ -373,6 +384,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
+name = "cmpv2"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "961b955a666e25ee5a1091d219128d6e6401e3dab84efb1a2bf6b4035d797b39"
+dependencies = [
+ "crmf",
+ "der 0.7.10",
+ "spki 0.7.3",
+ "x509-cert",
+]
+
+[[package]]
+name = "cms"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b77c319abfd5219629c45c34c89ba945ed3c5e49fcde9d16b6c3885f118a730"
+dependencies = [
+ "const-oid 0.9.6",
+ "der 0.7.10",
+ "spki 0.7.3",
+ "x509-cert",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -428,6 +463,18 @@ name = "crc-catalog"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
+
+[[package]]
+name = "crmf"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36fe21b96d5b87f5de4b5b7202ec41c00110ac817ce6728fe75fb2fe5962ed92"
+dependencies = [
+ "cms",
+ "der 0.7.10",
+ "spki 0.7.3",
+ "x509-cert",
+]
 
 [[package]]
 name = "crossbeam-queue"
@@ -3806,6 +3853,17 @@ dependencies = [
  "der 0.7.10",
  "spki 0.7.3",
  "tls_codec",
+]
+
+[[package]]
+name = "x509-tsp"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5ceece934a21607055b7ac5c25adb56a2ff559804b10705dc674d1d838c15e1"
+dependencies = [
+ "cmpv2",
+ "cms",
+ "der 0.7.10",
 ]
 
 [[package]]

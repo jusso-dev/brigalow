@@ -23,6 +23,7 @@ fn exercise(backend: &dyn KeyBackend, algorithms: &[Algorithm]) {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     let digest = Sha256::digest(b"Brigalow generated test artifact");
+    std::fs::write(d.join("artifact"), b"Brigalow generated test artifact").unwrap();
     std::fs::write(d.join("digest"), digest).unwrap();
     for algorithm in algorithms {
         let key = backend.generate(*algorithm, Purpose::Test).unwrap();
@@ -123,6 +124,34 @@ fn exercise(backend: &dyn KeyBackend, algorithms: &[Algorithm]) {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
+            if *algorithm != Algorithm::Ed25519 {
+                let cms = brigalow_crypto::cms::detached(backend, &key, &digest, &chain).unwrap();
+                std::fs::write(d.join("signature.cms"), cms.der).unwrap();
+                openssl(
+                    d,
+                    &[
+                        "cms",
+                        "-verify",
+                        "-binary",
+                        "-inform",
+                        "DER",
+                        "-in",
+                        "signature.cms",
+                        "-content",
+                        "artifact",
+                        "-CAfile",
+                        "ca.pem",
+                        "-purpose",
+                        "any",
+                        "-out",
+                        "verified",
+                    ],
+                );
+                assert_eq!(
+                    std::fs::read(d.join("verified")).unwrap(),
+                    b"Brigalow generated test artifact"
+                );
+            }
             assert_eq!(
                 certificates::validate_chain(&public, &chain, &anchors, now).unwrap(),
                 TrustTier::Private

@@ -41,6 +41,8 @@ futures-util = "0.3"
 integration = []
 
 [dev-dependencies]
+cms = "0.2.3"
+der = "0.7"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 

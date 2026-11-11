@@ -1,7 +1,9 @@
 //! Signing custody boundary. This API deliberately has no private-key export operation.
 pub mod certificates;
+pub mod cms;
 pub mod pkcs11;
 pub mod software;
+pub mod timestamp;
 pub use brigalow_core::keys::{Algorithm, DigestAlgorithm, Key};
 use brigalow_core::Purpose;
 use der::{

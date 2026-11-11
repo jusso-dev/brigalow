@@ -7,3 +7,7 @@ PKCS#11 selects an existing exact-label token and creates sensitive, non-extract
 PKCS#10 uses RustCrypto encoders. Certificate import requires matching SPKI; rustls-webpki validates paths with mandatory code-signing EKU. An unknown issuer produces `untrusted`; accepted configured anchors produce `private`, with external anchor classification applied only by operator configuration in the server.
 
 `cargo test -p brigalow-crypto` uses generated keys and OpenSSL verification. `scripts/e2e.sh --context <context>` also runs the dedicated Linux `pkcs11-tests` suite in a disposable SoftHSM container. No real CA or external signing service is contacted.
+
+Detached CMS uses RustCrypto signed attributes and certificates; independent tests use OpenSSL with `-purpose any` because these are code-signing certificates, not S/MIME certificates. SHA-256 CMS currently supports RSA/P-256, while raw signing also supports Ed25519 over digest bytes.
+
+RFC 3161 uses `x509-tsp`/`cms` encoders, verified HTTPS and a pinned TSA signer. Nonce, imprint, signed attributes, timestamp-only EKU, certificate path, time and signature are verified before returning a token. Required/optional timestamp policy is enforced by the server.

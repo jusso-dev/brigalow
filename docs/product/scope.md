@@ -14,12 +14,12 @@ Brigalow is an open-source, self-hosted signing control plane. Build systems sen
 
 This is the most important line in the product and every screen, doc and API response must respect it.
 
-| | **Self-hosted trust** (Brigalow can deliver this alone) | **Public trust** (needs an outside CA and paid enrolment) |
+| | **Self-hosted trust** (Brigalow can deliver this alone) | **Public trust** (needs an outside CA, usually with paid enrolment) |
 | --- | --- | --- |
 | Who trusts the signature | Machines you configure: your MDM, App Control/WDAC policy, container admission controller, firmware root of trust, package repo keys | Operating systems and browsers out of the box (for example Windows SmartScreen, macOS Gatekeeper) |
 | Where the certificate comes from | Brigalow's optional private CA, or your existing internal CA | A publicly trusted CA after identity validation (for example DigiCert, Sectigo, SSL.com, Microsoft via Azure Artifact Signing) |
 | Key custody | HSM via PKCS#11 recommended; software keys allowed only in `lab` mode | Whatever the CA's rules require (certified hardware). Brigalow can hold the key in your HSM if the CA accepts key attestation from it, or delegate signing to the CA's own service |
-| Cost | Your infrastructure | Certificate purchase, validation, and often a signing subscription or HSM attestation fee |
+| Cost | Your infrastructure | Usually a certificate purchase and validation, and often a signing subscription or HSM attestation fee. Some programmes, such as SignPath Foundation for open-source projects, provide certificates under their own terms |
 | What Brigalow adds | Everything: keys, policy, approvals, audit, short-lived certs | Policy, approvals and audit in front of a key or service that the CA governs |
 
 Brigalow never claims a signature is publicly trusted. It reports the trust tier of each key and certificate as configured by the operator, and flags certificates whose chain does not lead to a configured trust anchor.

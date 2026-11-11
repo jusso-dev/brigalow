@@ -82,6 +82,10 @@ run("/work/target/debug/brig", "sign", "--server", config["server"], "--org", co
     "--project", config["project"], "--policy", config["policy"], "--ca-file", config["ca_file"],
     "--format", "raw", "--output", str(release/"manifest.sig"), str(release/"manifest.json"))
 (release/"lab-public.pem").write_bytes(pathlib.Path("public.pem").read_bytes())
+# These are public release outputs. The container runs as root, while the host
+# verification/upload runs as the unprivileged CI user. Never apply to key files.
+for public_output in ["manifest.sig", "lab-public.pem"]:
+    (release/public_output).chmod(0o644)
 run("python3", "/work/scripts/verify_release.py", str(release), "--public-key", str(release/"lab-public.pem"))
 manifest = (release/"manifest.json").read_bytes()
 (release/"manifest.json").write_bytes(manifest+b" ")

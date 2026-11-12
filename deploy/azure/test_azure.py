@@ -111,7 +111,7 @@ class Boot(unittest.TestCase):
             self.assertFalse(any(forbidden in name for name in names), forbidden)
 
     def test_failures_withhold_details(self):
-        with patch.object(boot, "read_secrets", side_effect=ValueError("secret-value-123")), \
+        with patch.object(boot, "read_secrets_until", side_effect=ValueError("secret-value-123")), \
                 patch.object(boot, "ROOT", self.dir), patch.object(boot, "RUN", self.dir / "run"):
             (self.dir / "boot.json").write_text(json.dumps({"vault": "v", "client_id": "c"}))
             with patch("sys.stderr") as stderr, patch.object(sys, "argv", ["boot", "up", "-d"]):
@@ -120,6 +120,31 @@ class Boot(unittest.TestCase):
             written = "".join(call.args[0] for call in stderr.write.call_args_list)
             self.assertNotIn("secret-value-123", written)
             self.assertIn("details withheld", written)
+
+    def test_secret_reads_retry_until_a_bounded_deadline(self):
+        clock = [0.0]
+        pauses = []
+        def sleep(seconds):
+            pauses.append(seconds)
+            clock[0] += seconds
+        # Succeeds once access propagates.
+        calls = iter([ValueError("403"), ValueError("403"), {"ok": True}])
+        def flaky(*_):
+            value = next(calls)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        with patch.object(boot, "read_secrets", side_effect=flaky):
+            self.assertEqual(boot.read_secrets_until("v", "c", 900, lambda: clock[0], sleep), {"ok": True})
+        self.assertEqual(pauses, [5, 10])
+        # Never succeeds: stops at the deadline instead of retrying forever.
+        clock[0], pauses[:] = 0.0, []
+        with patch.object(boot, "read_secrets", side_effect=ValueError("403")):
+            with self.assertRaises(ValueError):
+                boot.read_secrets_until("v", "c", 900, lambda: clock[0], sleep)
+        self.assertLessEqual(clock[0], 900)
+        self.assertGreaterEqual(clock[0], 600, "must allow at least 10 minutes for propagation")
+        self.assertLessEqual(max(pauses), boot.SECRET_RETRY_MAX_PAUSE)
 
     def test_imds_and_vault_calls_refuse_redirects_and_proxies(self):
         handlers = [type(h).__name__ for h in boot.OPENER.handlers]

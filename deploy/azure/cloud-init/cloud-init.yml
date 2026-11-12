@@ -35,17 +35,18 @@ write_files:
       After=network-online.target docker.service
       Wants=network-online.target
       Requires=docker.service
-      # New role assignments can take up to 10 minutes to apply; keep retrying a failed start.
-      StartLimitIntervalSec=1800
-      StartLimitBurst=30
+      # brigalow-boot.py retries Key Vault reads for up to 15 minutes itself. systemd adds at
+      # most two more starts after that, then leaves the unit failed for an operator.
+      StartLimitIntervalSec=3600
+      StartLimitBurst=3
       [Service]
       Type=oneshot
       RemainAfterExit=yes
       ExecStart=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py up -d --force-recreate
       ExecStop=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py down
-      TimeoutStartSec=300
+      TimeoutStartSec=1200
       Restart=on-failure
-      RestartSec=30
+      RestartSec=60
       [Install]
       WantedBy=multi-user.target
 runcmd:

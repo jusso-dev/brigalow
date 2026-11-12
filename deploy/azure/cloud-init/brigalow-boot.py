@@ -16,10 +16,15 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 
 IMDS = "http://169.254.169.254/metadata/identity/oauth2/token"
+# New role assignments can take up to 10 minutes to apply. Retry reads for longer than that,
+# then stop: a bounded total, not an open-ended loop.
+SECRET_DEADLINE_SECONDS = 15 * 60
+SECRET_RETRY_MAX_PAUSE = 60
 VAULT_RESOURCE = "https://vault.azure.net"
 VAULT_API = "7.4"
 ROOT = Path("/opt/brigalow")
@@ -85,6 +90,22 @@ def read_secrets(vault, client_id):
     return values
 
 
+def read_secrets_until(vault, client_id, deadline_seconds=SECRET_DEADLINE_SECONDS,
+                       clock=time.monotonic, sleep=time.sleep):
+    """Retry Key Vault reads with capped backoff until they succeed or the deadline passes."""
+    end = clock() + deadline_seconds
+    pause = 5
+    while True:
+        try:
+            return read_secrets(vault, client_id)
+        except Exception:
+            remaining = end - clock()
+            if remaining <= 0:
+                raise
+            sleep(min(pause, remaining))
+            pause = min(pause * 2, SECRET_RETRY_MAX_PAUSE)
+
+
 def private_dir(path, uid):
     if path.is_symlink():
         raise ValueError("symlinked directory")
@@ -141,7 +162,7 @@ def main():
     else:
         settings = json.loads((ROOT / "boot.json").read_text())
         try:
-            values = read_secrets(settings["vault"], settings["client_id"])
+            values = read_secrets_until(settings["vault"], settings["client_id"])
             image, config, tls = materialise(values)
             image_file.write_text(image + "\n")
         except Exception:

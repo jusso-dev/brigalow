@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/brigalow-banner.png" alt="Brigalow: certificate and code signing platform" width="100%">
+</p>
+
 # Brigalow
 
 Open-source, self-hosted signing control plane. Build systems send a digest; Brigalow checks who is asking and whether policy allows it, has a key in an HSM sign it, and keeps a tamper-evident record.

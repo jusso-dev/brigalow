@@ -1543,14 +1543,25 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
         .unwrap();
     let url = format!("https://127.0.0.1:{}", line.trim());
     // Cargo's test executable sits in `<profile>/deps/` (Rust <= 1.99) or
-    // `<profile>/build/<package>/<hash>/out/` (Rust 1.100+). Find `brig` in
-    // the nearest ancestor profile directory rather than assuming a depth.
-    let binary = std::env::current_exe()
-        .unwrap()
+    // `<profile>/build/<package>/<hash>/out/` (Rust 1.100+). Use `brig` from
+    // that profile directory only, never from a higher (possibly shared) one.
+    let exe = std::env::current_exe().unwrap();
+    let profile = exe
         .ancestors()
-        .map(|dir| dir.join("brig"))
-        .find(|candidate| candidate.is_file())
-        .expect("`brig` binary in the test's target profile directory; build it with `cargo build -p brig`");
+        .find(|dir| {
+            matches!(
+                dir.file_name().and_then(|n| n.to_str()),
+                Some("deps" | "build")
+            )
+        })
+        .and_then(std::path::Path::parent)
+        .expect("test executable under a Cargo `deps` or `build` directory");
+    let binary = profile.join("brig");
+    assert!(
+        binary.is_file(),
+        "`brig` missing from {}; build it with `cargo build -p brig`",
+        profile.display()
+    );
     for format in ["raw", "cms"] {
         let mut command = std::process::Command::new(&binary);
         command.current_dir(d).env("BRIGALOW_TOKEN", &token).args([

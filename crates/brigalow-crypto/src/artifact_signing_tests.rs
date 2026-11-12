@@ -145,7 +145,7 @@ fn pinned_key_operations_are_absent() {
     assert!(backend
         .remote_key(key.id, Uuid::new_v4(), Uuid::new_v4())
         .is_err());
-    let attempt = backend.sign_rotating(&key, &[0; 32]);
+    let attempt = backend.sign_rotating(&key, &[0; 32], &|_| Ok(()));
     assert!(attempt.operation_id.is_none() && attempt.outcome.is_err());
 }
 

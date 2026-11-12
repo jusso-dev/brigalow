@@ -221,6 +221,17 @@ fn at_az_01_rotating_results_require_anchor_profile_eku_and_valid_signature() {
             ],
         )
     };
+    // Shared EKUs never identify one profile, even with a valid CA anchor.
+    for shared in [
+        "1.3.6.1.4.1.311.97.1.0",
+        "1.3.6.1.4.1.311.97.1.3.1",
+        "1.3.6.1.4.1.311.97.1.4.1",
+    ] {
+        assert!(
+            Expectation::new(read(d, "root.der"), shared).is_err(),
+            "{shared}"
+        );
+    }
     let expectation = Expectation::new(read(d, "root.der"), PROFILE_EKU).unwrap();
     let remote = |leaf: &str, intermediate: &str, key: &str| Remote {
         signature: sign(key, "digest"),

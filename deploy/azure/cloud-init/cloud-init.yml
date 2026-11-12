@@ -35,12 +35,17 @@ write_files:
       After=network-online.target docker.service
       Wants=network-online.target
       Requires=docker.service
+      # New role assignments can take up to 10 minutes to apply; keep retrying a failed start.
+      StartLimitIntervalSec=1800
+      StartLimitBurst=30
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      ExecStart=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py up -d
+      ExecStart=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py up -d --force-recreate
       ExecStop=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py down
       TimeoutStartSec=300
+      Restart=on-failure
+      RestartSec=30
       [Install]
       WantedBy=multi-user.target
 runcmd:

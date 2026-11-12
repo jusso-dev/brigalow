@@ -4,8 +4,9 @@ useDefault = true
 
 # Azure built-in role definition IDs are public, fixed GUIDs published by Microsoft
 # (for example "Key Vault Secrets User"). They grant nothing on their own.
+# The regex matches only the role-ID assignment itself, never a whole file or path,
+# so any other secret on another line is still reported.
 [[allowlists]]
 description = "Public Azure built-in role definition GUIDs in Bicep"
-paths = ['''^deploy/azure/modules/[a-z]+\.bicep$''']
-regexTarget = "line"
-regexes = ['''^var [A-Za-z]+RoleId = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'$''']
+regexTarget = "match"
+regexes = ['''RoleId = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'''']

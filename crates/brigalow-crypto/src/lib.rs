@@ -66,7 +66,15 @@ pub trait KeyBackend: Send + Sync {
     }
     /// One untrusted remote attempt for a rotating key. Callers must use [`rotating::sign`],
     /// which validates the returned chain and signature before anything is output.
-    fn sign_rotating(&self, _key: &Key, _digest: &[u8]) -> rotating::Attempt {
+    /// `accepted` is called with the remote operation ID as soon as the service accepts the
+    /// request, before polling, so the caller can record it durably even if this attempt is
+    /// later abandoned. If it returns an error the attempt stops without polling.
+    fn sign_rotating(
+        &self,
+        _key: &Key,
+        _digest: &[u8],
+        _accepted: &dyn Fn(&str) -> Result<()>,
+    ) -> rotating::Attempt {
         rotating::Attempt::failed(None, Error::Unavailable)
     }
 }

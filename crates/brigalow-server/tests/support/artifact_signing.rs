@@ -98,6 +98,14 @@ async fn audit_entry(
     subject: Uuid,
     action: &str,
 ) -> brigalow_core::audit::Entry {
+    find_audit(f, org, subject, action).await.unwrap()
+}
+async fn find_audit(
+    f: &Fixture,
+    org: Uuid,
+    subject: Uuid,
+    action: &str,
+) -> Option<brigalow_core::audit::Entry> {
     let (mut after, mut found) = (0, None);
     loop {
         let page = f.store.tenant(org).audit_page(after, 1000).await.unwrap();
@@ -108,7 +116,7 @@ async fn audit_entry(
             .rfind(|e| e.subject == subject.to_string() && e.action == action)
             .or(found);
     }
-    found.unwrap()
+    found
 }
 const PROFILE_EKU: &str = "1.3.6.1.4.1.311.97.4242.1.1";
 
@@ -619,6 +627,51 @@ async fn at_az_01_artifact_signing_rotating_chain_verified_fail_closed() {
             "{mode}"
         );
     }
+    // Every accepted operation is audited before polling, so a request dropped mid-poll
+    // (client disconnect or shutdown) still leaves its operation ID in the audit log.
+    mock.set("mode", "timeout");
+    let posts = mock.count("sign", "POST");
+    let input = submission(policy.id, "raw");
+    let abandoned: Uuid = serde_json::from_value(input["request_id"].clone()).unwrap();
+    let pending = tokio::spawn({
+        let router = f.router.clone();
+        let (path, cookie, csrf) = (submit.clone(), submitter.0.clone(), submitter.1.clone());
+        async move {
+            request_at(
+                &router,
+                "POST",
+                &path,
+                Some(&cookie),
+                None,
+                Some(&csrf),
+                input,
+            )
+            .await
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while mock.count("sign", "POST") == posts {
+        assert!(std::time::Instant::now() < deadline, "no signing request");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    pending.abort();
+    let _ = pending.await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let accepted = loop {
+        if let Some(entry) = find_audit(&f, org, abandoned, "request.remote_accepted").await {
+            break entry;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "operation ID not audited"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let operation = accepted.details["operation_id"].as_str().unwrap();
+    assert!(!operation.is_empty());
+    assert_eq!(mock.count("sign", "POST"), posts + 1, "never retried");
+    mock.set("mode", "pass");
+
     // A 401 discards the cached token; the next request fetches a new one.
     mock.set("mode", "unauthorized");
     assert_eq!(sign!("raw").1 .0, 502);

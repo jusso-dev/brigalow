@@ -131,7 +131,9 @@ def materialise(values, run=RUN, server_uid=SERVER_UID, proxy_uid=PROXY_UID,
 
 
 def main():
-    command = sys.argv[1:] or ["up", "-d"]
+    # The directories are rewritten on every start, so recreate the containers: a container left
+    # running from an earlier start would keep a bind mount to the removed directory.
+    command = sys.argv[1:] or ["up", "-d", "--force-recreate"]
     config, tls, image_file = RUN / "config", RUN / "tls", RUN / "image"
     if command == ["down"] and image_file.is_file():
         # Stopping needs no secrets: reuse the directories written at start.

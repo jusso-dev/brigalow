@@ -5,7 +5,9 @@ using './main.bicep'
 
 param prefix = 'brigalow'
 param image = 'REGISTRY.example/brigalow@sha256:REPLACE_WITH_REVIEWED_64_HEX_DIGEST'
-param httpsSourceCidr = '203.0.113.0/24'
+// REQUIRED: replace with the egress ranges of your CI runners and staff networks. The value
+// below is a documentation-only range (RFC 5737) that matches no real client.
+param httpsSourceCidr = 'REPLACE_WITH_CI_AND_ADMIN_EGRESS_CIDR'
 param enableSsh = false
 param sshPublicKey = 'ssh-ed25519 AAAA_REPLACE_WITH_PUBLIC_KEY operator@example'
 
@@ -45,7 +47,9 @@ param certificateProfileName = 'brigalow-release'
 param signingSku = 'Basic'
 param certificateProfileType = 'PrivateTrust'
 param identityValidationId = '00000000-0000-0000-0000-000000000000'
-param signingEndpoint = 'https://eus.codesigning.azure.net'
+// Must match the resource group's region, or signing fails with 403. Example: East US uses eus.
+// See Microsoft's regional endpoint list in the Artifact Signing quickstart.
+param signingEndpoint = 'https://REGION_CODE.codesigning.azure.net'
 
 param postgresAdministratorLogin = 'brigalow_owner'
 param postgresAdministratorPassword = az.getSecret('SUBSCRIPTION_ID', 'OPERATOR_RG', 'operator-vault', 'brigalow-pg-owner-password')

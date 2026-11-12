@@ -135,7 +135,7 @@ pub fn detached_rotating(
     backend: &dyn KeyBackend,
     key: &Key,
     digest: &[u8],
-    at: u64,
+    accepted: &dyn Fn(&str) -> Result<()>,
 ) -> RotatingCms {
     use sha2::Digest;
     if key.algorithm != Algorithm::Rsa3072 {
@@ -149,7 +149,7 @@ pub fn detached_rotating(
         Err(error) => return (None, Err(error)),
     };
     let (operation, verified) =
-        crate::rotating::sign(backend, key, &sha2::Sha256::digest(&attrs.1), at);
+        crate::rotating::sign(backend, key, &sha2::Sha256::digest(&attrs.1), accepted);
     let result = verified.and_then(|v| {
         let cms = assemble(attrs.0, v.signature, &v.chain, Algorithm::Rsa3072)?;
         Ok((cms, v.chain))

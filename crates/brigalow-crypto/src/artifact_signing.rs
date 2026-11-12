@@ -543,7 +543,12 @@ impl KeyBackend for ArtifactSigning {
     fn rotating(&self, key: &Key) -> Result<Expectation> {
         Ok(self.binding(key)?.expectation.clone())
     }
-    fn sign_rotating(&self, key: &Key, digest: &[u8]) -> Attempt {
+    fn sign_rotating(
+        &self,
+        key: &Key,
+        digest: &[u8],
+        accepted: &dyn Fn(&str) -> Result<()>,
+    ) -> Attempt {
         let binding = match self.binding(key) {
             Ok(binding) => binding,
             Err(error) => return Attempt::failed(None, error),
@@ -583,6 +588,11 @@ impl KeyBackend for ArtifactSigning {
         let Some(id) = operation_id(&body["operationId"]) else {
             return Attempt::failed(None, Error::Backend);
         };
+        // Record the accepted operation before polling. If that fails, stop here: an
+        // unrecorded operation must not go on to produce output.
+        if let Err(error) = accepted(&id) {
+            return Attempt::failed(Some(id), error);
+        }
         let outcome = self.poll(binding, token.as_str(), &id, deadline);
         Attempt {
             operation_id: Some(id),

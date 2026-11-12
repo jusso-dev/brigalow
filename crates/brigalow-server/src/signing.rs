@@ -309,18 +309,41 @@ async fn remote_sign(
     }
     let key = key.key.clone();
     let input = request.submission.clone();
-    let now = crate::auth::now() as u64;
-    let (operation_id, result) = tokio::task::spawn_blocking(move || match input.format {
-        Format::Raw => {
-            let (id, verified) = rotating::sign(backend.as_ref(), &key, &input.digest, now);
-            (
-                id,
-                verified.map(|v| (v.signature.clone(), v.signature, v.chain)),
-            )
-        }
-        Format::Cms => {
-            let (id, result) = cms::detached_rotating(backend.as_ref(), &key, &input.digest, now);
-            (id, result.map(|(c, chain)| (c.der, c.signature, chain)))
+    // Durably audit the remote operation ID as soon as Azure accepts it, before polling. The
+    // blocking task keeps running even if this request future is dropped (client disconnect or
+    // shutdown), so the ID survives even when the final result is never persisted.
+    let tenant = state
+        .store
+        .tenant(request.principal.as_ref().ok_or(Error::Unavailable)?.org_id);
+    let actor = request.requester.clone();
+    let subject = request.submission.request_id.to_string();
+    let runtime = tokio::runtime::Handle::current();
+    let (operation_id, result) = tokio::task::spawn_blocking(move || {
+        let accepted = |operation: &str| -> std::result::Result<(), Error> {
+            runtime
+                .block_on(tenant.record(
+                    &actor,
+                    "request.remote_accepted",
+                    &subject,
+                    serde_json::json!({ "operation_id": operation }),
+                ))
+                .map(|_| ())
+                .map_err(|_| Error::Backend)
+        };
+        match input.format {
+            Format::Raw => {
+                let (id, verified) =
+                    rotating::sign(backend.as_ref(), &key, &input.digest, &accepted);
+                (
+                    id,
+                    verified.map(|v| (v.signature.clone(), v.signature, v.chain)),
+                )
+            }
+            Format::Cms => {
+                let (id, result) =
+                    cms::detached_rotating(backend.as_ref(), &key, &input.digest, &accepted);
+                (id, result.map(|(c, chain)| (c.der, c.signature, chain)))
+            }
         }
     })
     .await

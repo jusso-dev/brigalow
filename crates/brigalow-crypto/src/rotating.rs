@@ -17,6 +17,14 @@ use x509_cert::{
 
 /// Every Artifact Signing profile EKU sits under this Microsoft arc.
 pub const PROFILE_EKU_PREFIX: &str = "1.3.6.1.4.1.311.97.";
+/// EKUs Microsoft documents as shared, not profile-specific: `.1.0` marks every Public Trust
+/// certificate, and the `.1.3.1` / `.1.4.1` arcs are type prefixes. Pinning one of these would
+/// accept another subscriber's signature under the same root, so they are refused.
+const SHARED_EKUS: [&str; 3] = [
+    "1.3.6.1.4.1.311.97.1.0",
+    "1.3.6.1.4.1.311.97.1.3.1",
+    "1.3.6.1.4.1.311.97.1.4.1",
+];
 /// DER content octets of id-kp-codeSigning (1.3.6.1.5.5.7.3.3).
 const CODE_SIGNING: &[u8] = &[0x2b, 6, 1, 5, 5, 7, 3, 3];
 const MAX_CERTIFICATES: usize = 10;
@@ -45,6 +53,9 @@ impl Expectation {
         }
         let der = rustls_pki_types::CertificateDer::from(anchor.as_slice());
         webpki::anchor_from_trusted_cert(&der).map_err(|_| Error::Certificate)?;
+        if SHARED_EKUS.contains(&profile_eku) {
+            return Err(Error::Certificate);
+        }
         let suffix = profile_eku
             .strip_prefix(PROFILE_EKU_PREFIX)
             .ok_or(Error::Certificate)?;
@@ -204,11 +215,13 @@ pub fn verify(
 }
 
 /// One remote signing attempt followed by independent acceptance checks. Never retried.
+/// Certificates are validated at the time the remote attempt finishes, not when it started:
+/// a certificate that expires while polling must not be accepted.
 pub fn sign(
     backend: &dyn KeyBackend,
     key: &Key,
     digest: &[u8],
-    at: u64,
+    accepted: &dyn Fn(&str) -> Result<()>,
 ) -> (Option<String>, Result<Verified>) {
     if !backend.rotates() {
         return (None, Err(Error::Unavailable));
@@ -220,10 +233,14 @@ pub fn sign(
     if let Err(error) = check_digest(digest) {
         return (None, Err(error));
     }
-    let attempt = backend.sign_rotating(key, digest);
-    let result = attempt
-        .outcome
-        .and_then(|remote| verify(&remote, &expectation, digest, at));
+    let attempt = backend.sign_rotating(key, digest, accepted);
+    let result = attempt.outcome.and_then(|remote| {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Backend)?
+            .as_secs();
+        verify(&remote, &expectation, digest, at)
+    });
     (attempt.operation_id, result)
 }
 

@@ -108,6 +108,18 @@ def sign(args, manifest, signature):
     return request
 
 
+def untracked_output(parent, source):
+    """Staging under a non-ignored path in the source checkout would dirty it mid-packaging."""
+    source = Path(source or Path(__file__).resolve().parents[1]).resolve()
+    if parent != source and source not in parent.parents:
+        return
+    probe = parent/".brigalow-operator-probe"
+    ignored = subprocess.run(["git", "check-ignore", "-q", "--no-index", str(probe)], cwd=source)
+    if ignored.returncode != 0:
+        raise Failed(f"output directory {parent} is inside the source checkout and not ignored by git; "
+                     "choose an output outside the checkout or under an ignored path such as dist/")
+
+
 def run(args, state):
     output = args.output
     if os.path.lexists(output):
@@ -120,8 +132,13 @@ def run(args, state):
     if not os.environ.get("BRIGALOW_TOKEN"):
         raise Failed("BRIGALOW_TOKEN is required")
     pinned_key(args.public_key, output)
+    untracked_output(parent, args.source)
     staging = Path(tempfile.mkdtemp(prefix=".brigalow-operator-", dir=parent))
     try:
+        # Prove no-replace publication works here before spending a signature or window slot.
+        probe = staging/"probe"
+        probe.mkdir()
+        publish_no_replace(probe, staging/"probe-published")
         bundle, signing = staging/"bundle", staging/"signing"
         signing.mkdir(mode=0o700)
         revision = package(args.binaries, bundle, trust="operator", source=args.source)

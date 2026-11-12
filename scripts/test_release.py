@@ -390,6 +390,33 @@ class Workflow(Fixture):
         self.public = self.root/"missing.pem"
         self.assert_failed(self.release(), calls=0, request=False)
 
+    def test_output_in_unignored_checkout_path_refused_before_submission(self):
+        (self.source/"releases").mkdir()
+        self.output = self.source/"releases"/"brigalow-operator"
+        result = self.release()
+        self.assert_failed(result, calls=0, request=False)
+        self.assertIn("not ignored by git", result.stderr)
+        self.assertFalse(os.path.lexists(self.output))
+
+    def test_unusable_publication_refused_before_submission(self):
+        import operator_release
+        original = operator_release.publish_no_replace
+        def unsupported(source, target):
+            raise Failed("no atomic no-replace rename primitive on this platform; refusing to publish")
+        operator_release.publish_no_replace = unsupported
+        try:
+            args = type("Args", (), dict(output=self.output, expected_revision=None, public_key=self.public,
+                                         source=self.source, binaries=self.binaries))()
+            os.environ["BRIGALOW_TOKEN"] = "generated-test-token"
+            with self.assertRaises(Failed):
+                operator_release.run(args, {})
+        finally:
+            operator_release.publish_no_replace = original
+            os.environ.pop("BRIGALOW_TOKEN", None)
+        self.assertEqual(self.call_count(), 0, "probe must fail before any signing request")
+        self.assertFalse(os.path.lexists(self.output))
+        self.assertEqual([p.name for p in self.published.iterdir() if p.name.startswith(".brigalow-operator-")], [])
+
     def test_no_replace_primitive(self):
         source, target = self.root/"staged", self.root/"target"
         source.mkdir()

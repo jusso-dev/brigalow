@@ -146,6 +146,8 @@ impl Identity {
             if !valid(&a.issuer)
                 || !valid(&a.jwks_url)
                 || a.name.is_empty()
+                // Matches the pending_logins.provider column limit.
+                || a.name.len() > 128
                 || !a
                     .name
                     .bytes()
@@ -375,5 +377,30 @@ impl Identity {
             })
             .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn config(name: String) -> IdentityConfig {
+        IdentityConfig {
+            public_url: "https://brigalow.test".into(),
+            ca_file: None,
+            authorities: vec![Authority {
+                org_id: Uuid::nil(),
+                name,
+                issuer: "https://idp.test".into(),
+                jwks_url: "https://idp.test/jwks".into(),
+                provider: Provider::Github,
+                human: None,
+                workloads: vec![],
+            }],
+        }
+    }
+    #[test]
+    fn authority_names_fit_the_pending_login_column() {
+        assert!(Identity::new(config("a".repeat(128)), Mode::Lab, None).is_ok());
+        assert!(Identity::new(config("a".repeat(129)), Mode::Lab, None).is_err());
     }
 }

@@ -44,6 +44,8 @@ brig audit verify checkpoint-001/audit.jsonl --checkpoint checkpoint-001/checkpo
   --public-key /independent/audit-public.der --expected-head <org>:<seq>:<entry_hash>
 ```
 
+Before replacing the recorded head with a newer one, run the command above against the new bundle with `--expected-head` set to the new head, then confirm the new `audit.jsonl` still contains the previously recorded entry: the line at the old sequence must carry the old `entry_hash`. Only then update the external record. If either check fails, keep the old head and treat the chain as tampered: a DB writer may have replaced history before the new checkpoint was signed.
+
 The verifier rejects an older, newer or substituted checkpoint. Without `--expected-head` it reports "cryptographically valid prefix; freshness unknown". Do not treat that result as current or retained. If the external head is unavailable or was not advanced, do not declare off-host retention or a current audit state.
 
 ### Recovering an interrupted checkpoint
@@ -93,7 +95,7 @@ Only one server replica is supported. Pending OIDC logins are now stored in Post
 
 Human OIDC login requires a dedicated 256-bit key protecting pending-login PKCE verifiers and nonces in Postgres ([ADR 0004](decisions/0004-shared-login-state.md)). The server refuses to start with a human authority and no key ring. Keep this key separate from HSM PINs, signing keys and DB credentials. Never put it in TOML, Helm values, logs or fixtures.
 
-Provision it as a private file containing base64 of 32 random bytes, for example `openssl rand -base64 32 > login_key && chmod 0600 login_key`, run inside your secret-management process. Reference it by path:
+Provision it as a private file containing base64 of 32 random bytes, for example `(umask 077 && openssl rand -base64 32 > login_key)`, which creates the file as 0600 from the start, run inside your secret-management process. Reference it by path:
 
 ```toml
 [login_keys]
@@ -128,11 +130,11 @@ The generated key is ephemeral and the manifest explicitly says `lab`. Its inclu
 Before use, the operator separately provisions:
 
 - a P-256 or RSA-3072 `release` key generated in their PKCS#11 device, with a certificate chain to a configured private or external-CA anchor and (for `offline` keys) a release window;
-- a `release`-purpose policy with the approvals, gates and claims they require, and a scoped submitter credential in `BRIGALOW_TOKEN`;
+- a `release`-purpose policy with the approvals, gates and claims they require, and a workload OIDC token in `BRIGALOW_TOKEN` from a CI job matching that policy's workload rule. Release policies require verified repository, ref, environment and `ref_protected` claims, which API credentials do not carry;
 - the release public key, exported from Brigalow and distributed to consumers through an independently trusted channel. Record its SPKI SHA-256 fingerprint for `--expected-key-sha256`.
 
 ```sh
-python3 scripts/operator_release.py --binaries target/release --output releases/brigalow-<commit> \
+python3 scripts/operator_release.py --binaries target/release --output dist/brigalow-<commit> \
   --public-key <pinned-release-public.pem> --expected-key-sha256 <reviewed-fingerprint> \
   --expected-revision <full-commit> --server https://<brigalow> --org <UUID> --project <UUID> \
   --policy <release-policy> --ca-file <server-ca.pem>

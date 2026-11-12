@@ -41,8 +41,9 @@ impl Tenant {
         .bind(checkpoint.seq as i64)
         .fetch_optional(&mut *tx)
         .await?;
+        // The stored chain no longer matches the signed head: distinct from a duplicate record.
         if hash.as_deref() != Some(&checkpoint.entry_hash) {
-            return Err(Error::Conflict);
+            return Err(Error::Audit);
         }
         // A checkpoint authenticates this exact prefix, even if new events have arrived.
         let changed=sqlx::query("INSERT INTO brigalow.audit_checkpoints(org_id,seq,record) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(self.org_id).bind(checkpoint.seq as i64).bind(Json(signed)).execute(&mut *tx).await?.rows_affected();

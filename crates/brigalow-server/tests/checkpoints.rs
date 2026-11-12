@@ -241,6 +241,22 @@ async fn at_aud_03_interrupted_publication_recovers_without_resigning() {
         tenant.save_checkpoint(&resigned).await,
         Err(brigalow_store::Error::Conflict)
     ));
+    // A head whose stored entry hash differs is a distinct outcome, not a duplicate.
+    let mut changed = record.checkpoint.clone();
+    changed.entry_hash = "0".repeat(64);
+    let changed = brigalow_crypto::audit::sign(&f.backend.inner, &f.key, changed).unwrap();
+    assert!(matches!(
+        tenant.save_checkpoint(&changed).await,
+        Err(brigalow_store::Error::Audit)
+    ));
+    // Rejected before any write: another organisation's checkpoint.
+    let mut foreign = record.checkpoint.clone();
+    foreign.org_id = Uuid::new_v4();
+    let foreign = brigalow_crypto::audit::sign(&f.backend.inner, &f.key, foreign).unwrap();
+    assert!(matches!(
+        tenant.save_checkpoint(&foreign).await,
+        Err(brigalow_store::Error::Invalid)
+    ));
     // Existing output is never replaced, and no signature is produced for it.
     tenant
         .record("test", "test.event", "x", serde_json::json!({}))

@@ -146,7 +146,7 @@ active = { id = "production-test", file = "/run/brigalow/login_key" }
         for name in [proxy, server]:
             result = subprocess.run(docker+["logs", name], capture_output=True, text=True)
             diagnostic = result.stdout + result.stderr
-            for value in protected + [(app/"db_password").read_text()]:
+            for value in protected + [(app/"db_password").read_text(), login_key]:
                 diagnostic = diagnostic.replace(value, "[REDACTED]")
             print(diagnostic[-2000:])
         raise

@@ -29,6 +29,8 @@ pub enum Error {
     OutputExists,
     #[error("checkpoint {0} is already persisted; use `brigalow-audit recover` instead of signing again")]
     AlreadyPersisted(u64),
+    #[error("audit entry {0} no longer matches the signed head; nothing was persisted. Verify the audit chain before checkpointing again")]
+    HeadChanged(u64),
     #[error("checkpoint {0} was signed but persistence is unconfirmed; run `brigalow-audit recover` for this sequence and do not re-sign")]
     PersistenceUnconfirmed(u64),
     #[error("checkpoint {0} is persisted but its output was not published; run `brigalow-audit recover` for this sequence")]
@@ -154,8 +156,11 @@ pub async fn create(
         brigalow_crypto::audit::sign(backend, key, checkpoint).map_err(|_| Error::Failed)?;
     match tenant.save_checkpoint(&signed).await {
         Ok(()) => {}
-        // Uniqueness or head conflicts commit nothing; the signature is discarded unpublished.
+        // Each rejection below commits nothing; the signature is discarded unpublished.
         Err(brigalow_store::Error::Conflict) => return Err(Error::AlreadyPersisted(seq)),
+        Err(brigalow_store::Error::Audit) => return Err(Error::HeadChanged(seq)),
+        Err(brigalow_store::Error::Invalid) => return Err(Error::Failed),
+        // Database or commit failure: the outcome is unknown.
         Err(_) => return Err(Error::PersistenceUnconfirmed(seq)),
     }
     hook(Phase::Persisted).map_err(|_| Error::NotPublished(seq))?;

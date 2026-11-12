@@ -1,3 +1,4 @@
+{{- if ne (int .Values.replicas) 1 -}}{{ fail "only one replica is supported; OIDC login state is process-local" }}{{- end -}}
 {{- $image := required "image must be set to a reviewed immutable digest" .Values.image -}}
 {{- if not (regexMatch "^.+@sha256:[a-f0-9]{64}$" $image) -}}{{ fail "image must use a sha256 digest" }}{{- end -}}
 {{- $secret := required "existingSecret is required; never put secret values in Helm values" .Values.existingSecret -}}
@@ -7,6 +8,8 @@ metadata:
   name: {{ .Release.Name }}
 spec:
   replicas: {{ .Values.replicas }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: {{ .Release.Name }}
@@ -45,6 +48,8 @@ spec:
           image: {{ $image | quote }}
           command: ["/usr/local/bin/brigalow-server"]
           env:
+            - name: BRIGALOW_MODE
+              value: production
             - name: BRIGALOW_CONFIG
               value: /run/brigalow/config.toml
             - name: BRIGALOW_IDENTITY_FILE
@@ -59,10 +64,23 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            timeoutSeconds: 2
           readinessProbe:
             httpGet:
               path: /healthz
               port: http
+            timeoutSeconds: 6
+            periodSeconds: 10
           resources:
 {{ toYaml .Values.resources | indent 12 }}
           volumeMounts:

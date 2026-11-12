@@ -36,15 +36,15 @@ Database TLS always verifies both CA and hostname. Use the database CA certifica
 
 ## Database setup for manual development
 
-Use a dedicated empty PostgreSQL database with TLS enabled. Apply `crates/brigalow-store/migrations/0001_foundations.sql` as the database owner using your existing administrative connection tooling, with stop-on-error and one transaction. It creates the `brigalow` schema and non-login `brigalow_app` role. Subsequent managed migrations use the exported sqlx `MIGRATOR`; do not mix manual SQL application and sqlx migration tracking in the same database.
+Use a dedicated PostgreSQL database with verified TLS. Run `brigalow-admin migrate` with separate owner credentials to apply every embedded SQLx migration under its migration lock. Do not apply SQL files manually or mix migration tracking systems. Run `brigalow-admin org-create --org <UUID> --name <name>` to provision an organisation and its initial audit record atomically. Repeated matching provisioning is idempotent; conflicting names fail.
 
-Provision a separate login named `brigalow_runtime`, with membership in `brigalow_app`, no superuser, BYPASSRLS, role/database creation or table ownership. Set its password through a secure administrative prompt or secret provisioner, never through checked-in SQL or command-line values. The server uses only this login and never migrates schema at startup. Organisation provisioning remains an owner-only development operation until authenticated administration exists.
+Provision a separate runtime login with membership in `brigalow_app`, no superuser, BYPASSRLS, replication, role/database creation or table ownership. Set its password through a secure administrative prompt or secret provisioner. The server refuses schema drift and never migrates at startup. See the [production reference](../deploy/production/README.md) for owner/runtime separation and configuration.
 
 ```sh
 cargo run -p brigalow-server
 ```
 
-`GET /healthz` reports `status`, `mode` and `signing_available` based on configured identity/backend. There is no debug/config endpoint. Tenant APIs require a valid session, scoped API token or verified workload identity. Shutdown handles SIGTERM and Ctrl-C. Runtime database failure returns 503. Logs accept application targets only; `RUST_LOG` cannot expose dependency debug output.
+`GET /livez` checks process liveness. `GET /healthz` reports `status`, `mode` and `signing_available`; production checks the database and authenticated HSM session. There is no debug/config endpoint. Tenant APIs require a valid session, scoped API token or verified workload identity. Shutdown handles SIGTERM and Ctrl-C. Runtime database failure returns 503. Logs accept application targets only; `RUST_LOG` cannot expose dependency debug output.
 
 ## Audit format and limits
 
@@ -123,7 +123,7 @@ See [private CA operations](private-ca.md). `brigalow-ca` uses a separate restri
 
 ## Operations checks (Phase 8)
 
-See [operations](operations.md) for credential budgets, signed checkpoints, recovery, fuzzing, the draft chart and lab release workflow. The full Compose harness includes scratch-only backup/restore and HSM reference recovery. `python3 scripts/test_release.py` and `python3 scripts/test_helm.py` check packaging and local chart rendering.
+See [operations](operations.md) for credential budgets, signed checkpoints, recovery, fuzzing, the single-instance chart and lab release workflow. The full Compose harness includes scratch-only backup/restore and HSM reference recovery. `python3 scripts/test_release.py` and `python3 scripts/test_helm.py` check packaging and local chart rendering.
 
 ## Remote signing mock
 

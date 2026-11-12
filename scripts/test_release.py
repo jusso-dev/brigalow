@@ -6,7 +6,7 @@ import tarfile
 import tempfile
 with tempfile.TemporaryDirectory(prefix="brigalow-release-test-") as directory:
     d=pathlib.Path(directory);binaries=d/"bin";binaries.mkdir()
-    names=["brig","brigalow-server","brigalow-ca","brigalow-audit","libbrigalow_pkcs11.so"]
+    names=["brig","brigalow-server","brigalow-ca","brigalow-audit", "brigalow-admin","libbrigalow_pkcs11.so"]
     for name in names: (binaries/name).write_bytes(b"generated packaging fixture")
     subprocess.run(["python3","scripts/package_release.py","--binaries",str(binaries),"--output",str(d/"dist")],check=True)
     with tarfile.open(d/"dist/brigalow-linux.tar.gz") as archive:

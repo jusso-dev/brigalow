@@ -1,0 +1,35 @@
+{{- if not .Values.networkPolicy.egress -}}{{ fail "networkPolicy.egress must explicitly allow required dependency destinations" }}{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "ingressNamespace required" .Values.networkPolicy.ingressNamespace | quote }}
+          podSelector:
+            matchLabels:
+{{ toYaml .Values.networkPolicy.ingressPodLabels | indent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{ toYaml .Values.networkPolicy.egress | indent 4 }}

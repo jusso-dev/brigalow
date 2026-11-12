@@ -1,4 +1,4 @@
-# Draft only. Supply an immutable image digest built and reviewed by your operator.
+# Single-instance production reference; operator qualification still required. Supply an immutable image digest built and reviewed by your operator.
 image: ""
 replicas: 1
 # Existing Secret containing config.toml, identity.json and referenced credentials.
@@ -11,3 +11,13 @@ resources:
   limits:
     cpu: "2"
     memory: 1Gi
+
+networkPolicy:
+  # TLS ingress must enforce connection/header/body/time limits independently of API budgets.
+  ingressNamespace: ingress-nginx
+  ingressPodLabels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/component: controller
+  # Required operator-reviewed destination CIDRs/ports for Postgres, IdP, TSA/gates and HSM.
+  # DNS egress to kube-system/k8s-app=kube-dns is added separately.
+  egress: []

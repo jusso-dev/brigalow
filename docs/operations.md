@@ -1,6 +1,6 @@
 # Operations and hardening
 
-Brigalow is self-hosted. These are operator procedures and a draft deployment design, not a production deployment or a security/compliance certification. Run the complete acceptance suite and commission an independent review of your exact configuration/revision before production use.
+Brigalow is self-hosted. These are operator procedures and a tested single-instance deployment reference, not a production deployment or a security/compliance certification. Run the complete acceptance suite and commission an independent review of your exact configuration/revision before production use.
 
 ## Request budgets and ingress
 
@@ -14,9 +14,9 @@ requests = 600
 period_seconds = 60
 ```
 
-Both values must be positive; maxima are 100,000 requests and 3,600 seconds. A fixed window starts at the credential's first use and resets on the database clock. API credentials and browser sessions have individual budgets. Workload tokens share a budget for their verified actor and authorised scope, so refreshing a JWT cannot reset it. Cross-tenant calls do not share another tenant's budget. Every authenticated API/UI request consumes a slot, including subsequently denied policy actions. Exhausted budgets return 429 and audit once per window; subsequent rejects do not flood the audit chain. Database errors fail closed. Old counters are removed in bounded batches after an hour beyond reset. Coordinate configuration across replicas.
+Both values must be positive; maxima are 100,000 requests and 3,600 seconds. A fixed window starts at the credential's first use and resets on the database clock. API credentials and browser sessions have individual budgets. Workload tokens share a budget for their verified actor and authorised scope, so refreshing a JWT cannot reset it. Cross-tenant calls do not share another tenant's budget. Every authenticated API/UI request consumes a slot, including subsequently denied policy actions. Exhausted budgets return 429 and audit once per window; subsequent rejects do not flood the audit chain. Database errors fail closed. Old counters are removed in bounded batches after an hour beyond reset. Keep configuration consistent through controlled restarts.
 
-Postgres serialises budget decisions with the existing tenant audit lock; this prioritises deterministic security over peak throughput. Benchmark your expected tenant load and HSM latency. Horizontal replicas do not multiply a credential's allowance. No caller-controlled forwarding/IP header grants a different authenticated identity.
+Postgres serialises budget decisions with the existing tenant audit lock; this prioritises deterministic security over peak throughput. Benchmark your expected tenant load and HSM latency. Database-shared budgets do not imply support for horizontal replicas. No caller-controlled forwarding/IP header grants a different authenticated identity.
 
 ## Signed audit checkpoints
 
@@ -49,13 +49,15 @@ Recovery sequence:
 
 `scripts/backup_restore.py` is a harness-only destructive drill. `scripts/e2e.sh --context <local-context>` invokes it against uniquely named disposable Compose resources. It dumps the generated test DB, restores a scratch copy, wipes only that scratch DB, restores again, verifies all audit chains/checkpoints and exact request states, and proves the restored HSM reference can sign a digest independently verified by OpenSSL. The source DB is never dropped. This does not test a vendor HSM backup or a production restore.
 
-## HA and draft Helm chart
+## Single-instance deployment and readiness
 
-Application instances are stateless except for live backend sessions and in-flight work. Shared Postgres holds sessions, credentials, budgets, approvals, release-window caps and signing intents. Use the same reviewed identity/policy/provider configuration on every replica. HSM vendor libraries, token sessions, supported HA and network controls are operator dependencies. Scale only after testing the actual HSM and DB capacity; no exactly-once hardware-signature guarantee exists across crashes.
+Use the [production reference](../deploy/production/README.md) for the container image, TLS Compose configuration, Helm chart, separate migration command and organisation bootstrap. Production startup requires PKCS#11, configured identity and the exact applied migration set/checksums. The runtime cannot apply migrations or rewrite their history. `brigalow-admin` is a separate owner-only process; its credentials must never reach the server.
 
-The draft chart is `deploy/helm/brigalow`. It requires a reviewed immutable image digest and an existing Kubernetes Secret. It provides a ClusterIP service only, no public ingress, CA process or migrations. Mount config paths under `/run/brigalow`; the init container copies projected Secret symlinks into a memory-backed volume as regular 0600 files owned by the non-root runtime. The reviewed image must include POSIX sh/cp/chmod and the configured HSM library. Secret changes require a controlled rollout; copying is startup-only. Supply your TLS proxy, network policy, external Postgres, secret provisioning and vendor HSM integration. Never put secret values into Helm values or rendered output.
+Only one server replica is supported. Pending OIDC state is process-local, so restart invalidates unfinished logins; authenticated sessions and signing intents remain in Postgres. Helm rejects additional replicas. A shared database alone does not provide login coordination or qualify vendor HSM failover. There is no exactly-once hardware-signature guarantee across crashes.
 
-Local rendering is tested with `python3 scripts/test_helm.py`; no Kubernetes cluster is contacted. The chart has not been deployed or claimed production-ready. Use a migration owner job separately and complete migrations before rolling out compatible server revisions. Never run migrations from each application replica.
+`/livez` checks process liveness; `/healthz` also checks Postgres and the logged-in HSM session in production. An unavailable/busy HSM makes readiness fail without signing. Vendor transport timeouts remain operator-owned because native calls cannot be forcibly cancelled safely.
+
+The chart requires a digest-pinned provider image, runtime-only Secret and explicit egress rules. It supplies a default-deny NetworkPolicy, private ClusterIP service and restricted container. Projected secrets are copied into memory-backed regular 0600 files; changes require rollout. A real cluster must enforce the policy through its CNI and supply trusted TLS ingress. Local rendering and disposable Compose tests do not establish cluster or vendor-device readiness. No production service has been deployed.
 
 ## Parser fuzzing
 

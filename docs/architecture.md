@@ -81,3 +81,9 @@ submitted -> authorised -> (awaiting_approval) -> (gating) -> signing -> signed
 - No private key export endpoint, even for admins.
 - No "approve all" bulk action.
 - No silent fallback from HSM to software keys.
+
+## Production reference and dependency boundaries
+
+The production reference supports one HTTP process behind a TLS proxy. Pending browser OIDC state remains process-local; existing sessions, approvals and signing intents are durable. Helm rejects replicas greater than one. The image runs non-root with a read-only filesystem and requires an operator-provided PKCS#11 module. SoftHSM exists only in the acceptance target. See [operations](operations.md).
+
+`brigalow-admin` applies embedded SQLx migrations and creates organisations using separate owner credentials. The HTTP runtime checks exact schema versions/checksums with read-only migration-history access. `brigalow-postgres` is a small re-export facade over official SQLx core/Postgres crates, excluding unused SQLite dependencies; no database protocol or crypto is implemented there. OAuth2 handles PKCE URL construction; jsonwebtoken/AWS-LC verifies RS256 tokens with explicit OIDC claim checks. [ADR 0003](decisions/0003-dependency-audit.md) records dependency choices and audit gates.

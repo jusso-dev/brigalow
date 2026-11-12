@@ -1,0 +1,46 @@
+# Single-instance reference. Review image digest, external DB/HSM/IdP and TLS before use.
+services:
+  server:
+    image: ${BRIGALOW_IMAGE:?set an operator-reviewed image at sha256 digest}
+    user: "10001:10001"
+    environment:
+      BRIGALOW_MODE: production
+      BRIGALOW_BIND: 0.0.0.0:8080
+      BRIGALOW_CONFIG: /run/brigalow/config.toml
+      BRIGALOW_IDENTITY_FILE: /run/brigalow/identity.json
+    volumes:
+      - ${BRIGALOW_CONFIG_DIR:?set private config directory owned by UID 10001}:/run/brigalow:ro
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m,uid=10001,gid=10001,mode=0700"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 2
+    stop_grace_period: 40s
+    restart: unless-stopped
+    networks: [control-plane]
+    # No published HTTP port. Only the TLS proxy reaches this container.
+  proxy:
+    image: nginxinc/nginx-unprivileged:stable-bookworm@sha256:cd33960e98e93d4d63385790ff7f8f5bf2ca95184c581b7f42ae8aea1139fbfc
+    user: "101:101"
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    depends_on:
+      server:
+        condition: service_healthy
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${BRIGALOW_TLS_DIR:?set TLS directory owned by UID 101}:/run/tls:ro
+    ports:
+      - "${BRIGALOW_LISTEN_IP:-127.0.0.1}:${BRIGALOW_HTTPS_PORT:-8443}:8443"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m,uid=101,gid=101,mode=0700"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 1
+    restart: unless-stopped
+    networks: [control-plane]
+networks:
+  control-plane: {}

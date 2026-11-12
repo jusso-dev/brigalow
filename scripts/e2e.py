@@ -70,7 +70,11 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
         tsa_address = run(compose + ["port", "tsa", "8443"], capture_output=True, text=True).stdout.strip()
         env["BRIGALOW_TEST_TSA_URL"] = "https://" + tsa_address
         run(["cargo", "build", "--locked", "-p", "brig"])
+        run(["cargo", "build", "--locked", "-p", "brigalow-server", "--bin", "brigalow-admin"])
+        from production_test import bootstrap, qualify
+        bootstrap(env, root)
         run(["cargo", "test", "--locked", "-p", "brigalow-store", "--features", "integration"])
+        bootstrap(env, root, restricted=True)
         if not args.tools_only:
             run(["cargo", "test", "--locked", "--workspace", "--features", "integration"])
         run(compose + ["build", "tools"])
@@ -81,6 +85,7 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
         run(["python3", "scripts/verify_release.py", str(release), "--public-key", str(release/"lab-public.pem")])
         if args.tools_only:
             raise SystemExit(0)
+        qualify(compose, env, root, directory)
         # Independently invoke the public CLI on the database-backed export.
         export = Path(directory)/"audit.jsonl"
         verify = ["cargo", "run", "--locked", "--quiet", "-p", "brig", "--", "audit", "verify"]

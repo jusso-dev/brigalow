@@ -20,7 +20,7 @@ Final review findings addressed:
 1. Compose accepted mutable image tags despite the documented immutable-image contract. Added the checked `scripts/production.py` entry point, used by deployment instructions, with negative tests.
 2. Mode-only validation accepted root-owned private directories/files unreadable by the runtime UIDs. Added ownership checks for both directories and every file, plus separate wrong-owner regressions. This reference assumes ordinary Linux Docker UID mapping; user namespaces/Desktop sharing require separate qualification.
 
-No other confirmed blocker was reported in those source reviews. Final follow-up verdict and hosted results for the delivered commit are recorded on the Phase 8 tracking issue. No review establishes absence of defects.
+No other confirmed blocker was reported in those source reviews. Consult the Phase 8 tracking issue for the final follow-up verdict and hosted results for the delivered commit; local source review alone does not establish those gates. No review establishes absence of defects.
 
 ## Local evidence
 

@@ -1,6 +1,8 @@
 # Azure Artifact Signing evaluation
 
-Decision: document a possible future remote backend; do not create an account or implement a production adapter in Phase 9. The CSC mock is not an Azure adapter. All observations below come from the [2026-11-11 evidence register, A1–A10](../research/evidence-register.md); they are dated vendor documentation, not independently exercised service behaviour.
+Update 2026-11-12: an `artifact_signing` backend now exists, tested against a local contract mock only. See [Azure Artifact Signing backend](azure-artifact-signing.md). The original evaluation is kept below.
+
+Original decision: document a possible future remote backend; do not create an account or implement a production adapter in Phase 9. The CSC mock is not an Azure adapter. All observations below come from the [2026-11-11 evidence register, A1–A10](../research/evidence-register.md); they are dated vendor documentation, not independently exercised service behaviour.
 
 | Consideration | Evidence and implication |
 | --- | --- |

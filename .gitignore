@@ -10,3 +10,6 @@ target/
 __pycache__/
 
 dist/
+
+# Azure parameter files with real values stay local.
+deploy/azure/*.bicepparam

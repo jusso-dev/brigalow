@@ -182,6 +182,19 @@ pub struct SignRequest {
     pub gate_results: Vec<crate::gates::Result>,
     #[serde(default)]
     pub attestation: Option<serde_json::Value>,
+    /// Rotating-key backends only: evidence of the one remote operation. Absent for others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteEvidence>,
+}
+/// The remote operation ID (audited even on failure) and, on success, the validated leaf
+/// certificate that produced the signature.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteEvidence {
+    pub operation_id: Option<String>,
+    pub certificate: Option<Vec<u8>>,
+    /// Lowercase hex SHA-256 of `certificate`.
+    pub certificate_sha256: Option<String>,
 }
 
 impl RequestState {

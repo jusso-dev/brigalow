@@ -108,6 +108,7 @@ impl Tenant {
             window: None,
             gate_results: vec![],
             attestation: None,
+            remote: None,
         };
         let row: Option<Option<Json<Policy>>> = sqlx::query_scalar(
             "SELECT record FROM brigalow.policies WHERE org_id=$1 AND id=$2 AND project_id=$3",
@@ -197,12 +198,20 @@ impl Tenant {
         if changed != 1 {
             return Err(Error::Conflict);
         }
+        let mut details = serde_json::json!({"reason":request.failure});
+        // Rotating-key backends only; other backends keep the original details exactly.
+        if let Some(remote) = &request.remote {
+            details["remote"] = serde_json::json!({
+                "operation_id": remote.operation_id,
+                "certificate_sha256": remote.certificate_sha256,
+            });
+        }
         self.append(
             &mut tx,
             &request.requester,
             &format!("request.{state}"),
             &request.submission.request_id.to_string(),
-            serde_json::json!({"reason":request.failure}),
+            details,
         )
         .await?;
         tx.commit().await?;

@@ -88,7 +88,11 @@ pub async fn generate(
     }
     let backend = service.backend.clone();
     let remote = input.remote_key.is_some();
-    let (key, public_key) = tokio::task::spawn_blocking(move || {
+    let rotates = backend.rotates();
+    if rotates && !remote {
+        return Err(WebError(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+    let (key, public_key, pinned_anchor) = tokio::task::spawn_blocking(move || {
         let key = if let Some(id) = input.remote_key {
             let key = backend.remote_key(id, org, project)?;
             if key.algorithm != input.algorithm || key.purpose != input.purpose {
@@ -98,8 +102,12 @@ pub async fn generate(
         } else {
             backend.generate(input.algorithm, input.purpose)?
         };
+        if rotates {
+            // No stable public key exists. Each result must prove this pinned identity instead.
+            return Ok((key.clone(), vec![], Some(backend.rotating(&key)?.anchor)));
+        }
         match backend.public_key(&key) {
-            Ok(public) => Ok((key, public)),
+            Ok(public) => Ok((key, public, None)),
             Err(e) => {
                 if !remote {
                     let _ = backend.disable(&key);
@@ -117,6 +125,15 @@ pub async fn generate(
             crypto(error)
         }
     })?;
+    // A rotating key is labelled external-ca only when its pinned anchor is a configured
+    // external-ca trust anchor. Every signature is then validated to that anchor before output.
+    let anchor = pinned_anchor.and_then(|der| {
+        service
+            .anchors
+            .iter()
+            .find(|a| a.der == der && a.tier == TrustTier::ExternalCa)
+            .map(|a| a.name.clone())
+    });
     let record = KeyRecord {
         key,
         project,
@@ -125,11 +142,13 @@ pub async fn generate(
         offline: input.offline,
         trust: if service.backend.is_lab() {
             TrustTier::Lab
+        } else if anchor.is_some() {
+            TrustTier::ExternalCa
         } else {
             TrustTier::Untrusted
         },
         public_key,
-        anchor: None,
+        anchor,
         chain: vec![],
         revision: 0,
     };
@@ -161,6 +180,11 @@ pub async fn mutate(
     let service = service(&state)?;
     if record.backend != service.id {
         return Err(WebError(StatusCode::CONFLICT));
+    }
+    // Rotating keys have no stable public key: no CSR or chain import. Each result carries its
+    // own certificate, validated per operation.
+    if service.backend.rotates() && matches!(operation, Operation::Csr | Operation::Import) {
+        return Err(WebError(StatusCode::UNPROCESSABLE_ENTITY));
     }
     let action = match operation {
         Operation::Csr => {
@@ -226,7 +250,18 @@ pub async fn mutate(
                 return Err(WebError(StatusCode::CONFLICT));
             }
             // Resolve the persistent backend object before granting signing authority.
-            if service.backend.public_key(&record.key).map_err(crypto)? != record.public_key {
+            if service.backend.rotates() {
+                let backend = service.backend.clone();
+                let key = record.key.clone();
+                tokio::task::spawn_blocking(move || backend.rotating(&key))
+                    .await
+                    .map_err(|_| WebError(StatusCode::INTERNAL_SERVER_ERROR))?
+                    .map_err(crypto)?;
+                if !record.public_key.is_empty() {
+                    return Err(WebError(StatusCode::CONFLICT));
+                }
+            } else if service.backend.public_key(&record.key).map_err(crypto)? != record.public_key
+            {
                 return Err(WebError(StatusCode::CONFLICT));
             }
             "key.activated"

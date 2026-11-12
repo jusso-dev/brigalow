@@ -9,7 +9,7 @@ use axum::{
 };
 use brigalow_core::{
     keys::Algorithm,
-    policy::{Format, Policy, RequestState, SignRequest, Submission, Timestamp},
+    policy::{Format, Policy, RemoteEvidence, RequestState, SignRequest, Submission, Timestamp},
     rbac::{Action, Scope},
     Purpose,
 };
@@ -83,6 +83,13 @@ pub async fn create_policy(
         .keys
         .as_ref()
         .ok_or(WebError(StatusCode::SERVICE_UNAVAILABLE))?;
+    // Rotating keys sign digests only (RSA, raw or CMS). DSSE provenance needs a stable key
+    // and message signing, so that combination is refused here and again at signing.
+    if backend.backend.rotates()
+        && (policy.attestation || policy.algorithms.iter().any(|a| *a != Algorithm::Rsa3072))
+    {
+        return Err(WebError(StatusCode::UNPROCESSABLE_ENTITY));
+    }
     tenant
         .create_policy(
             &p.actor,
@@ -224,7 +231,8 @@ pub async fn complete(
             return Err(WebError(StatusCode::FORBIDDEN));
         }
     }
-    let result = produce(state, &request).await;
+    let (remote, result) = produce(state, &request).await;
+    request.remote = remote;
     match result {
         Ok((output, timestamp, attestation)) => {
             request.attestation = attestation;
@@ -244,10 +252,92 @@ pub async fn complete(
     Ok((StatusCode::CREATED, Json(request)))
 }
 type Produced = (Vec<u8>, Option<Vec<u8>>, Option<serde_json::Value>);
-async fn produce(
+type Outcome = std::result::Result<Produced, brigalow_crypto::Error>;
+async fn produce(state: &AppState, request: &SignRequest) -> (Option<RemoteEvidence>, Outcome) {
+    let rotates = state.keys.as_ref().is_some_and(|s| s.backend.rotates());
+    if !rotates {
+        return (None, produce_pinned(state, request).await);
+    }
+    let mut evidence = RemoteEvidence::default();
+    let result = match remote_sign(state, request, &mut evidence).await {
+        Ok((output, signature)) => finish(state, request, output, signature, false).await,
+        Err(error) => Err(error),
+    };
+    // Always recorded for rotating keys: an absent operation ID means none was received,
+    // not that the service did not sign (a lost submission is indistinguishable).
+    (Some(evidence), result)
+}
+/// Rotating-key path: one remote operation, accepted only after the returned chain validates
+/// to the pinned anchor with the profile EKU and the signature verifies with the leaf key.
+async fn remote_sign(
     state: &AppState,
     request: &SignRequest,
-) -> std::result::Result<Produced, brigalow_crypto::Error> {
+    evidence: &mut RemoteEvidence,
+) -> std::result::Result<(Vec<u8>, Vec<u8>), brigalow_crypto::Error> {
+    use brigalow_crypto::{cms, rotating, Error};
+    let service = state.keys.as_ref().ok_or(Error::Unavailable)?;
+    let key = request.key.as_ref().ok_or(Error::Unavailable)?;
+    let policy = request.policy.as_ref().ok_or(Error::Unavailable)?;
+    if key.backend != service.id
+        || !key.public_key.is_empty()
+        || key.key.algorithm != Algorithm::Rsa3072
+        || policy.attestation
+    {
+        return Err(Error::Unavailable);
+    }
+    let backend = service.backend.clone();
+    if policy.purpose == Purpose::Release {
+        // Release needs an external-ca label whose named anchor is still configured with that
+        // tier and is the anchor this backend validates every result against.
+        let pinned = {
+            let backend = backend.clone();
+            let key = key.key.clone();
+            tokio::task::spawn_blocking(move || backend.rotating(&key))
+                .await
+                .map_err(|_| Error::Backend)??
+                .anchor
+        };
+        if key.trust != brigalow_core::TrustTier::ExternalCa
+            || !service.anchors.iter().any(|a| {
+                Some(&a.name) == key.anchor.as_ref()
+                    && a.tier == brigalow_core::TrustTier::ExternalCa
+                    && a.der == pinned
+            })
+        {
+            return Err(Error::Certificate);
+        }
+    }
+    let key = key.key.clone();
+    let input = request.submission.clone();
+    let now = crate::auth::now() as u64;
+    let (operation_id, result) = tokio::task::spawn_blocking(move || match input.format {
+        Format::Raw => {
+            let (id, verified) = rotating::sign(backend.as_ref(), &key, &input.digest, now);
+            (
+                id,
+                verified.map(|v| (v.signature.clone(), v.signature, v.chain)),
+            )
+        }
+        Format::Cms => {
+            let (id, result) = cms::detached_rotating(backend.as_ref(), &key, &input.digest, now);
+            (id, result.map(|(c, chain)| (c.der, c.signature, chain)))
+        }
+    })
+    .await
+    .map_err(|_| Error::Backend)?;
+    evidence.operation_id = operation_id;
+    let (output, signature, chain) = result?;
+    use sha2::Digest;
+    evidence.certificate_sha256 = Some(
+        sha2::Sha256::digest(&chain[0])
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    );
+    evidence.certificate = Some(chain[0].clone());
+    Ok((output, signature))
+}
+async fn produce_pinned(state: &AppState, request: &SignRequest) -> Outcome {
     use brigalow_crypto::{certificates, cms, Error};
     let service = state.keys.as_ref().ok_or(Error::Unavailable)?;
     let key = request.key.as_ref().ok_or(Error::Unavailable)?;
@@ -271,7 +361,7 @@ async fn produce(
     let backend = service.backend.clone();
     let key = key.clone();
     let input = request.submission.clone();
-    let (mut output, signature) = tokio::task::spawn_blocking(move || {
+    let (output, signature) = tokio::task::spawn_blocking(move || {
         if backend.public_key(&key.key)? != key.public_key {
             return Err(Error::Unavailable);
         }
@@ -288,6 +378,19 @@ async fn produce(
     })
     .await
     .map_err(|_| Error::Backend)??;
+    finish(state, request, output, signature, policy.attestation).await
+}
+/// Shared by both paths: timestamp the signature and, for pinned keys, add provenance.
+async fn finish(
+    state: &AppState,
+    request: &SignRequest,
+    mut output: Vec<u8>,
+    signature: Vec<u8>,
+    attestation: bool,
+) -> Outcome {
+    use brigalow_crypto::{cms, Error};
+    let service = state.keys.as_ref().ok_or(Error::Unavailable)?;
+    let policy = request.policy.as_ref().ok_or(Error::Unavailable)?;
     let mut token = None;
     if policy.timestamp != Timestamp::Disabled {
         let result = match &state.tsa {
@@ -305,7 +408,7 @@ async fn produce(
             output = cms::attach_timestamp(&output, token)?;
         }
     }
-    let attestation = if policy.attestation {
+    let attestation = if attestation {
         let backend = service.backend.clone();
         let key = request.key.as_ref().ok_or(Error::Unavailable)?.key.clone();
         let request = request.clone();

@@ -1,0 +1,55 @@
+// Copy to main.bicepparam (git-ignored) and replace every placeholder. Contains no secrets:
+// secure values are Key Vault references to a separate, pre-existing operator vault that you
+// control. Bicep reads them at deployment time; they never appear in this file.
+using './main.bicep'
+
+param prefix = 'brigalow'
+param image = 'REGISTRY.example/brigalow@sha256:REPLACE_WITH_REVIEWED_64_HEX_DIGEST'
+param httpsSourceCidr = '203.0.113.0/24'
+param enableSsh = false
+param sshPublicKey = 'ssh-ed25519 AAAA_REPLACE_WITH_PUBLIC_KEY operator@example'
+
+param publicUrl = 'https://signing.example.org'
+param orgId = '00000000-0000-4000-8000-000000000000'
+param oidcAuthorities = [
+  {
+    name: 'github-actions'
+    issuer: 'https://token.actions.githubusercontent.com'
+    jwks_url: 'https://token.actions.githubusercontent.com/.well-known/jwks'
+    human: null
+    workloads: []
+  }
+  {
+    name: 'staff'
+    issuer: 'https://idp.example.org'
+    jwks_url: 'https://idp.example.org/jwks'
+    human: {
+      client_id: 'brigalow'
+      authorization_url: 'https://idp.example.org/authorize'
+      token_url: 'https://idp.example.org/token'
+      group_roles: {
+        'brigalow-admins': 'org_admin'
+      }
+    }
+    workloads: []
+  }
+]
+
+// Leave empty and the root as '-' for the first deployment. Fill them in after bootstrap creates
+// the project and you have reviewed the root and profile EKU (see deploy/azure/README.md).
+param artifactSigningBindings = []
+param artifactSigningRootDerBase64 = '-'
+
+param signingAccountName = 'brigalowsigning'
+param certificateProfileName = 'brigalow-release'
+param signingSku = 'Basic'
+param certificateProfileType = 'PrivateTrust'
+param identityValidationId = '00000000-0000-0000-0000-000000000000'
+param signingEndpoint = 'https://eus.codesigning.azure.net'
+
+param postgresAdministratorLogin = 'brigalow_owner'
+param postgresAdministratorPassword = az.getSecret('SUBSCRIPTION_ID', 'OPERATOR_RG', 'operator-vault', 'brigalow-pg-owner-password')
+param dbRuntimePassword = az.getSecret('SUBSCRIPTION_ID', 'OPERATOR_RG', 'operator-vault', 'brigalow-pg-runtime-password')
+param loginStateKey = az.getSecret('SUBSCRIPTION_ID', 'OPERATOR_RG', 'operator-vault', 'brigalow-login-state-key')
+param tlsCertificatePem = az.getSecret('SUBSCRIPTION_ID', 'OPERATOR_RG', 'operator-vault', 'brigalow-tls-crt')
+param tlsPrivateKeyPem = az.getSecret('SUBSCRIPTION_ID', 'OPERATOR_RG', 'operator-vault', 'brigalow-tls-key')

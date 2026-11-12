@@ -1,0 +1,49 @@
+#cloud-config
+# Brigalow single-instance Azure reference. Files below are the repository's reviewed
+# deploy/production reference and scripts/production.py, embedded unchanged by Bicep.
+# No secrets appear here: runtime secrets are read from Key Vault at each boot.
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - python3
+write_files:
+  - path: /opt/brigalow/deploy/production/compose.yml
+    encoding: b64
+    permissions: '0644'
+    content: __COMPOSE__
+  - path: /opt/brigalow/deploy/production/nginx.conf
+    encoding: b64
+    permissions: '0644'
+    content: __NGINX__
+  - path: /opt/brigalow/scripts/production.py
+    encoding: b64
+    permissions: '0755'
+    content: __PRODUCTION__
+  - path: /opt/brigalow/brigalow-boot.py
+    encoding: b64
+    permissions: '0755'
+    content: __BOOT__
+  - path: /opt/brigalow/boot.json
+    permissions: '0644'
+    content: '{"vault":"__VAULT__","client_id":"__CLIENT_ID__"}'
+  - path: /etc/systemd/system/brigalow.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Brigalow single-instance reference (secrets from Key Vault into /run)
+      After=network-online.target docker.service
+      Wants=network-online.target
+      Requires=docker.service
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py up -d
+      ExecStop=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py down
+      TimeoutStartSec=300
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, docker.service]
+  - [systemctl, enable, --now, brigalow.service]

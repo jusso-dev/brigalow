@@ -74,6 +74,18 @@ pub fn detached(
     }
     let attrs = signed_attributes(digest)?;
     let signature = backend.sign_message(key, &attrs.to_der().map_err(|_| Error::Certificate)?)?;
+    assemble(attrs, signature, chain, key.algorithm)
+}
+/// Encode a detached SignedData from signed attributes, their signature and the chain (leaf
+/// first). Callers must already have verified the signature against the leaf.
+pub fn assemble(
+    attrs: Attributes,
+    signature: Vec<u8>,
+    chain: &[Vec<u8>],
+    algorithm: Algorithm,
+) -> Result<Detached> {
+    let leaf = Certificate::from_der(chain.first().ok_or(Error::Certificate)?)
+        .map_err(|_| Error::Certificate)?;
     let signer = SignerInfo {
         version: CmsVersion::V1,
         sid: SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
@@ -82,7 +94,7 @@ pub fn detached(
         }),
         digest_alg: sha256_algorithm(),
         signed_attrs: Some(attrs),
-        signature_algorithm: signature_algorithm(key.algorithm),
+        signature_algorithm: signature_algorithm(algorithm),
         signature: OctetString::new(signature.clone()).map_err(|_| Error::Certificate)?,
         unsigned_attrs: None,
     };
@@ -114,6 +126,35 @@ pub fn detached(
         der: encode(&data)?,
         signature,
     })
+}
+/// Remote operation ID (if one was received) and the CMS with its validated chain.
+pub type RotatingCms = (Option<String>, Result<(Detached, Vec<Vec<u8>>)>);
+/// Detached CMS for a rotating-key backend: one remote signature over the signed-attribute
+/// digest, accepted only after [`crate::rotating::verify`]. Returns the CMS and validated chain.
+pub fn detached_rotating(
+    backend: &dyn KeyBackend,
+    key: &Key,
+    digest: &[u8],
+    at: u64,
+) -> RotatingCms {
+    use sha2::Digest;
+    if key.algorithm != Algorithm::Rsa3072 {
+        return (None, Err(Error::Algorithm));
+    }
+    let attrs = match signed_attributes(digest).and_then(|a| {
+        let der = a.to_der().map_err(|_| Error::Certificate)?;
+        Ok((a, der))
+    }) {
+        Ok(value) => value,
+        Err(error) => return (None, Err(error)),
+    };
+    let (operation, verified) =
+        crate::rotating::sign(backend, key, &sha2::Sha256::digest(&attrs.1), at);
+    let result = verified.and_then(|v| {
+        let cms = assemble(attrs.0, v.signature, &v.chain, Algorithm::Rsa3072)?;
+        Ok((cms, v.chain))
+    });
+    (operation, result)
 }
 fn encode(data: &SignedData) -> Result<Vec<u8>> {
     ContentInfo {

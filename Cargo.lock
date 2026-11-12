@@ -313,6 +313,7 @@ dependencies = [
  "spki 0.7.3",
  "tempfile",
  "thiserror 2.0.21",
+ "url",
  "uuid",
  "x509-cert",
  "x509-tsp",

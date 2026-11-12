@@ -8,11 +8,13 @@ rust-version.workspace = true
 [lints]
 workspace = true
 [features]
+# Test-only seams (loopback mock IMDS for artifact_signing). Never enabled in release builds.
 integration = []
 pkcs11-tests = []
 [dependencies]
 zeroize = "1"
 base64 = "0.22"
+url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking", "json"] }
 futures-util = "0.3"
 cms = "0.2.3"

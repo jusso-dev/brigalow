@@ -43,16 +43,18 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
     csr, extensions = str(Path(directory)/"server.csr"), Path(directory)/"server.ext"
     openssl("req", "-x509", "-newkey", "rsa:3072", "-nodes", "-keyout", ca_key, "-out", ca_cert,
             "-days", "1", "-subj", "/CN=Brigalow ephemeral test CA",
-            "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+            "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "-addext", "subjectKeyIdentifier=hash")
     openssl("req", "-new", "-newkey", "rsa:3072", "-nodes", "-keyout", server_key,
             "-out", csr, "-subj", "/CN=localhost")
-    extensions.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost,DNS:postgres,DNS:idp,DNS:tsa\n")
+    # Explicit key identifiers: strict X.509 clients (Python 3.13+) need AKI, which OpenSSL 4 omits by default.
+    extensions.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost,DNS:postgres,DNS:idp,DNS:tsa\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n")
     openssl("x509", "-req", "-in", csr, "-CA", ca_cert, "-CAkey", ca_key, "-CAcreateserial",
             "-out", server_cert, "-days", "1", "-extfile", str(extensions))
     tsa_key, tsa_csr, tsa_cert = [str(Path(directory)/name) for name in ("tsa.key","tsa.csr","tsa.pem")]
     openssl("req","-new","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-nodes","-keyout",tsa_key,"-out",tsa_csr,"-subj","/CN=Brigalow ephemeral TSA")
     tsa_ext=Path(directory)/"tsa.ext"
-    tsa_ext.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,timeStamping\n")
+    tsa_ext.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,timeStamping\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n")
     openssl("x509","-req","-in",tsa_csr,"-CA",ca_cert,"-CAkey",ca_key,"-CAcreateserial","-out",tsa_cert,"-days","1","-extfile",str(tsa_ext))
     for source, name in [(ca_cert,"ca.der"),(tsa_cert,"tsa.der")]:
         openssl("x509","-in",source,"-outform","DER","-out",str(Path(directory)/name))

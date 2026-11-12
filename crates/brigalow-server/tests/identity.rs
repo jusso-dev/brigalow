@@ -3011,3 +3011,292 @@ async fn at_ops_02_per_credential_rate_limits_and_audit() {
 #[cfg(feature = "tool-tests")]
 #[path = "support/csc.rs"]
 mod csc;
+
+/// AT-REC-01: interrupted `gating`/`signing` requests are inspectable read-only by
+/// human org admins/auditors; inspection mutates nothing and never reaches the backend.
+#[tokio::test]
+async fn at_rec_01_read_only_inspection_of_interrupted_requests() {
+    use brigalow_core::{
+        audit::Verifier,
+        keys::KeyRecord,
+        policy::{Policy, RequestState, Submission},
+        rbac::Principal,
+    };
+    let mut f = fixture().await;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    f.keys.backend = Arc::new(CountSigning {
+        backend: f.keys.backend.clone(),
+        calls: calls.clone(),
+    });
+    f.router = application(AppState {
+        rate_limit: Default::default(),
+        gates: Default::default(),
+        notifications: Default::default(),
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    let org = f.orgs[0];
+    let project = f.objects[0][0];
+    let tenant = f.store.tenant(org);
+    let custodian = role_session(&f, "custodian", vec![Role::KeyCustodian]).await;
+    let auditor = role_session(&f, "auditor", vec![Role::Auditor]).await;
+    let approver = role_session(&f, "approver", vec![Role::Approver]).await;
+    let submitter_session = role_session(&f, "submitter", vec![Role::Submitter]).await;
+    let admin = login(&f, org).await;
+    let result = json_as(
+        &f,
+        &format!("/v1/orgs/{org}/projects/{project}/keys"),
+        &custodian,
+        json!({"algorithm":"p256","purpose":"test","offline":false}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let key: KeyRecord = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/keys/{}/activate", key.key.id),
+            &custodian,
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    // Policies via the store: the gated one names a gate this router never runs.
+    let policy = |name: &str, gates: Vec<String>| Policy {
+        id: Uuid::new_v4(),
+        name: name.into(),
+        project,
+        key: key.key.id,
+        purpose: brigalow_core::Purpose::Test,
+        claims: Default::default(),
+        algorithms: vec![key.key.algorithm],
+        timestamp: brigalow_core::policy::Timestamp::Disabled,
+        approval: None,
+        gates,
+        attestation: false,
+    };
+    let direct = policy("rec-direct", vec![]);
+    let gated = policy("rec-gated", vec!["pass".into()]);
+    for p in [&direct, &gated] {
+        tenant.create_policy("fixture", p, true).await.unwrap();
+    }
+    let submitter = Principal {
+        org_id: org,
+        actor: "submitter".into(),
+        roles: vec![Role::Submitter],
+        scope: None,
+        human: false,
+        claims: Default::default(),
+    };
+    let submission = |policy: Uuid| -> Submission {
+        serde_json::from_value(json!({"request_id":Uuid::new_v4(),"policy":policy,"digest_alg":"sha256","digest":vec![9;32],"artifact_name":"interrupted.bin","format":"raw"})).unwrap()
+    };
+    // Simulate a crash after durable intent: prepare commits, `complete` never runs.
+    let signing = tenant
+        .prepare_sign(&submitter, project, submission(direct.id), true)
+        .await
+        .unwrap();
+    assert_eq!(signing.state, RequestState::Signing);
+    let gating = tenant
+        .prepare_sign(&submitter, project, submission(gated.id), true)
+        .await
+        .unwrap();
+    assert_eq!(gating.state, RequestState::Gating);
+    let path = |org: Uuid, id: Uuid| format!("/v1/orgs/{org}/requests/{id}/inspection");
+    let get = |session: &(String, String), path: String| {
+        let cookie = session.0.clone();
+        let f = &f;
+        async move { request(f, "GET", &path, Some(&cookie), None, None, Value::Null).await }
+    };
+    let snapshot = || async {
+        let rows: Vec<(Uuid, String, Option<Value>)> = sqlx::query_as(
+            "SELECT id,state,record FROM brigalow.sign_requests WHERE org_id=$1 ORDER BY id",
+        )
+        .bind(org)
+        .fetch_all(&f.admin)
+        .await
+        .unwrap();
+        let windows: Vec<(Uuid, i64)> =
+            sqlx::query_as("SELECT id,used FROM brigalow.release_windows WHERE org_id=$1")
+                .bind(org)
+                .fetch_all(&f.admin)
+                .await
+                .unwrap();
+        let ids: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM brigalow.request_ids WHERE org_id=$1")
+                .bind(org)
+                .fetch_one(&f.admin)
+                .await
+                .unwrap();
+        let head = tenant.audit_page(0, 1000).await.unwrap().len();
+        (serde_json::to_string(&rows).unwrap(), windows, ids, head)
+    };
+    // Not-interrupted requests are rejected rather than reported as outcome-unknown.
+    let rejected = tenant
+        .prepare_sign(
+            &Principal {
+                roles: vec![Role::Approver],
+                ..submitter.clone()
+            },
+            project,
+            submission(direct.id),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.state, RequestState::Rejected);
+    let secret = auth::random_secret();
+    tenant
+        .issue_credential(
+            &auth::hash(&secret),
+            &Principal {
+                scope: Some(Scope {
+                    project,
+                    policy: direct.id,
+                }),
+                ..submitter.clone()
+            },
+            None,
+            auth::now() + 600,
+            "fixture",
+        )
+        .await
+        .unwrap();
+    let before = snapshot().await;
+    for (session, expected) in [(&auditor, "signing"), (&admin, "signing")] {
+        let (status, _, body) = get(session, path(org, signing.submission.request_id)).await;
+        assert_eq!(status, 200, "{body}");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["state"], expected);
+        assert_eq!(v["outcome_unknown"], true);
+        assert_eq!(v["backend_invocation_possible"], true);
+        assert_eq!(v["policy"], json!(direct.id));
+        assert_eq!(v["key"], json!(key.key.id));
+        let actions: Vec<_> = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["action"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            actions,
+            ["request.submitted", "request.authorised", "request.signing"]
+        );
+        assert_eq!(v["events_truncated"], false);
+        // Bounded, public-only fields: no output, claims, digest, principal or credentials.
+        let fields: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(fields.len(), 9, "{fields:?}");
+        for secret in [&auditor.0, &auditor.1, &admin.0, &admin.1] {
+            let token = secret.rsplit('.').next().unwrap();
+            assert!(!body.contains(token));
+        }
+        assert!(body.len() < 4096);
+    }
+    let (status, _, body) = get(&auditor, path(org, gating.submission.request_id)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["state"], "gating");
+    assert_eq!(v["backend_invocation_possible"], false);
+    // Unauthorised roles, including workload/API credentials, cannot inspect.
+    for session in [&approver, &custodian, &submitter_session] {
+        assert_eq!(
+            get(session, path(org, signing.submission.request_id))
+                .await
+                .0,
+            403
+        );
+    }
+    assert_eq!(
+        request(
+            &f,
+            "GET",
+            &path(org, signing.submission.request_id),
+            None,
+            Some(&format!("brg_{org}.{secret}")),
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        403
+    );
+    // Unknown, placeholder and cross-tenant requests are 404; malformed IDs fail.
+    for id in [Uuid::new_v4(), f.objects[0][3], f.objects[1][3]] {
+        assert_eq!(get(&auditor, path(org, id)).await.0, 404);
+    }
+    assert_eq!(
+        get(&auditor, path(f.orgs[1], signing.submission.request_id))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        get(
+            &auditor,
+            format!("/v1/orgs/{org}/requests/not-a-uuid/inspection")
+        )
+        .await
+        .0,
+        400
+    );
+    // The route is GET-only: no mutation method exists for resolution.
+    for (method, _) in brigalow_server::recovery::ROUTES {
+        assert_eq!(method, "GET");
+    }
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &path(org, signing.submission.request_id),
+            Some(&admin.0),
+            None,
+            Some(&admin.1),
+            json!({})
+        )
+        .await
+        .0,
+        405
+    );
+    assert_eq!(
+        get(&auditor, path(org, rejected.submission.request_id))
+            .await
+            .0,
+        409
+    );
+    // Not-interrupted requests are rejected rather than reported as outcome-unknown.
+    assert_eq!(
+        get(&auditor, path(org, rejected.submission.request_id))
+            .await
+            .0,
+        409
+    );
+    // No DB mutation, no audit append, no cap refund, no backend invocation.
+    assert_eq!(snapshot().await, before);
+    let still: brigalow_core::policy::SignRequest = tenant
+        .sign_request(signing.submission.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.state, RequestState::Signing);
+    assert!(still.output.is_none());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // The original request ID stays consumed.
+    assert!(matches!(
+        tenant
+            .prepare_sign(&submitter, project, signing.submission.clone(), true)
+            .await,
+        Err(brigalow_store::Error::Conflict)
+    ));
+    let mut verifier = Verifier::default();
+    for entry in tenant.audit_page(0, 1000).await.unwrap() {
+        verifier.push(&entry).unwrap();
+    }
+    verifier.finish().unwrap();
+    f.store.close().await;
+    f.admin.close().await;
+}

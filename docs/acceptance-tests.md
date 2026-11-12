@@ -53,6 +53,10 @@ Verification uses independent tools where possible (OpenSSL), so we aren't only 
 - **AT-REL-01 Window.** Offline key with a window 10:00-10:30: signing at 10:31 is rejected; inside the window succeeds.
 - **AT-REL-02 Cap.** Window with cap 5: 20 concurrent sign requests yield exactly 5 signatures and 15 rejections.
 
+## Recovery
+
+- **AT-REC-01 Read-only interrupted-request inspection.** Requests left in `gating` or `signing` after a simulated crash are readable through `GET /v1/orgs/{org}/requests/{id}/inspection` by human `OrgAdmin`/`Auditor` sessions only. The response is bounded, carries `outcome_unknown=true`, says whether backend invocation was possible, and lists audit sequence/action summaries without output, claims, digests or credentials. Unknown, placeholder and cross-tenant IDs are 404; other roles and API credentials are 403; malformed IDs fail; non-interrupted states are 409; no mutation method exists. Request rows, request-ID reservations, window usage and the audit chain are byte-identical afterwards, the counting backend records zero calls, and the original request ID stays consumed. Terminal resolution is not implemented: it remains blocked on a fencing/quiescence design (`plans/001-recovery-outcome.md`). Run: `crates/brigalow-server/tests/identity.rs::at_rec_01_read_only_inspection_of_interrupted_requests`.
+
 ## Gates and attestation
 
 - **AT-GATE-01 Fail closed.** Gate returns pass: signed. Gate returns fail: rejected. Gate times out or returns a bad HMAC: rejected.

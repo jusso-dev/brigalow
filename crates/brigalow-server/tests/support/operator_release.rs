@@ -394,11 +394,25 @@ async fn at_rel_03_tool_operator_release_through_production_policy_path() {
             serde_json::from_str::<SignRequest>(&r.2).unwrap()
         }
     };
+    // brig prints the request ID before sending it, so wait until the server has stored it.
     let state = |id: Uuid| {
-        let get = &get;
+        let f = &f;
+        let cookie = admin.0.clone();
         async move {
-            serde_json::from_str::<SignRequest>(&get(format!("/v1/orgs/{org}/requests/{id}")).await)
-                .unwrap()
+            let path = format!("/v1/orgs/{org}/requests/{id}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let r = request(f, "GET", &path, Some(&cookie), None, None, Value::Null).await;
+                if r.0 == 200 {
+                    return serde_json::from_str::<SignRequest>(&r.2).unwrap();
+                }
+                assert!(
+                    r.0 == 404 && std::time::Instant::now() < deadline,
+                    "GET {path}: {}",
+                    r.0
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         }
     };
     let staging_clean = || {
@@ -515,6 +529,7 @@ async fn at_rel_03_tool_operator_release_through_production_policy_path() {
     // 2. Approver denial while brig waits: non-zero, request ID reported, nothing published.
     let run = start("denied", "300");
     let id = run.request_id().await;
+    assert_eq!(state(id).await.state, RequestState::AwaitingApproval);
     assert_eq!(decide(id, "deny").await.state, RequestState::Rejected);
     let (ok, _, stderr) = run.finish().await;
     assert!(!ok);

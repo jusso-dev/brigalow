@@ -70,7 +70,9 @@ hsm_pin_file = "/run/brigalow/hsm_pin"
     restricted = ["--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=128", "--memory=1g", "--cpus=2"]
     try:
         validation_env = dict(env, BRIGALOW_IMAGE="brigalow@sha256:"+"1"*64, BRIGALOW_CONFIG_DIR=str(app), BRIGALOW_TLS_DIR=str(tls))
-        subprocess.run(["python3", "scripts/production.py", "--context", docker[2], "config", "--quiet"], cwd=root, env=validation_env, check=True)
+        # Syntax only: host fixture ownership is mapped by Docker (including macOS).
+        # Guard ownership is unit-tested; actual container ownership is set below.
+        subprocess.run(docker+["compose", "-f", "deploy/production/compose.yml", "config", "--quiet"], cwd=root, env=validation_env, check=True)
         call("build", "--target", "production", "-t", runtime, ".")
         call("build", "--target", "test-runtime", "-t", test_image, ".")
         call("pull", PROXY)

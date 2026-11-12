@@ -4,6 +4,8 @@ Reviewed commit: `4b67b41adf2cd5eeb49089e3140db6bc5f98eea8` (clean `main`).
 
 A separate, read-only Codex reviewer (`/root/security_review`, reviewer role) inspected the committed source against [the checklist](security-review-checklist.md). The implementation agent independently examined the authentication and dependency findings. This is an AI-assisted source review, not an external professional audit or certification.
 
+Subsequent dependency remediation and production-reference evidence: [12 November follow-up](production-readiness-2026-11-12.md). The findings below describe the earlier reviewed revision.
+
 ## Scope and limitations
 
 Source review covered tenant RLS, composite references, restricted database roles, OIDC/PKCE, workload claims, session/credential handling, CSRF, approval/window/gate transitions, HSM and client PKCS#11 boundaries, CSC mock, certificates/CSR/private CA/CRL, audit checkpoints/restore, rate budgets, workflows and chart configuration. No further source-backed exploitable defect was identified. This does not establish absence of defects.

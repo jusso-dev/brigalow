@@ -62,7 +62,8 @@ impl Identity {
         // CI identity must be short-lived; an exp-only, arbitrarily long token is insufficient.
         let issued = claims["iat"].as_i64().ok_or(AuthError)?;
         let expires = claims["exp"].as_i64().ok_or(AuthError)?;
-        if issued > now() + 30 || expires - issued > 3600 || issued >= expires {
+        let lifetime = expires.checked_sub(issued).ok_or(AuthError)?;
+        if issued > now() + 30 || !(1..=3600).contains(&lifetime) {
             return Err(AuthError);
         }
         let rule = a

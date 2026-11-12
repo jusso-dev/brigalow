@@ -24,6 +24,11 @@ sha2 = {version="0.10",features=["oid"]}
 rsa = {version="0.9",features=["sha2"]}
 p256 = {version="0.13",features=["ecdsa","pkcs8"]}
 ed25519-dalek = {version="2",features=["rand_core","pkcs8"]}
+# Private RSA/P-256 operations use patched arithmetic. Legacy versions above
+# remain for public-key verification/encoding alongside OIDC dependencies.
+rsa-signing = {package="rsa",version="0.10",features=["pkcs1v15"]}
+p256-signing = {package="p256",version="0.14",features=["ecdsa","pkcs8"]}
+getrandom = {version="0.4",features=["sys_rng"]}
 signature = "2"
 rand = "0.8"
 der = {version="0.7",features=["alloc","derive","oid","pem"]}

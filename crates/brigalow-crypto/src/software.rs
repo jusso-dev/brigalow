@@ -1,11 +1,15 @@
 //! In-memory test-only keys. No persistence, export, production load or release purpose.
 use crate::*;
-use p256::ecdsa::{Signature, SigningKey};
-use rsa::{pkcs8::EncodePublicKey, RsaPrivateKey};
-use signature::{hazmat::PrehashSigner, Signer};
+use p256_signing::{
+    ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey},
+    elliptic_curve::Generate,
+};
+use rsa::pkcs8::EncodePublicKey as _;
+use rsa_signing::{pkcs8::EncodePublicKey as _, PrivateKey};
+use signature::Signer;
 use std::{collections::HashMap, sync::Mutex};
 enum Material {
-    Rsa(Box<RsaPrivateKey>),
+    Rsa(Box<PrivateKey>),
     Ec(SigningKey),
     Ed(ed25519_dalek::SigningKey),
 }
@@ -46,9 +50,11 @@ impl KeyBackend for Software {
         let mut rng = rand::rngs::OsRng;
         let material = match algorithm {
             Algorithm::Rsa3072 => Material::Rsa(Box::new(
-                RsaPrivateKey::new(&mut rng, 3072).map_err(|_| Error::Backend)?,
+                PrivateKey::new(&mut getrandom::SysRng, 3072).map_err(|_| Error::Backend)?,
             )),
-            Algorithm::P256 => Material::Ec(SigningKey::random(&mut rng)),
+            Algorithm::P256 => {
+                Material::Ec(SigningKey::try_generate().map_err(|_| Error::Backend)?)
+            }
             Algorithm::Ed25519 => Material::Ed(ed25519_dalek::SigningKey::generate(&mut rng)),
         };
         let key = Key {
@@ -94,11 +100,7 @@ impl KeyBackend for Software {
         check_digest(digest)?;
         self.with(key, |s| match &s.material {
             Material::Rsa(k) => k
-                .sign_with_rng(
-                    &mut rand::rngs::OsRng,
-                    rsa::Pkcs1v15Sign::new::<sha2::Sha256>(),
-                    digest,
-                )
+                .pkcs1v15_sign_prehash::<rsa_signing::sha2::Sha256>(digest)
                 .map_err(|_| Error::Backend),
             Material::Ec(k) => {
                 let signature: Signature = k.sign_prehash(digest).map_err(|_| Error::Backend)?;

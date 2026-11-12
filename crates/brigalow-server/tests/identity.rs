@@ -454,6 +454,35 @@ async fn at_id_02_workload_claims_and_at_id_03_expiry_rechecked() {
             "accepted invalid {field}"
         );
     }
+    // Signed but malformed dates must fail closed in debug and release builds.
+    let now = auth::now();
+    for (issued, expires) in [
+        (i64::MIN, now + 86400 * 30),
+        (now, now),
+        (now + 2, now + 1),
+        (now + 300, now + 600),
+        (now, now + 3601),
+    ] {
+        let mut invalid = claims.clone();
+        invalid["iat"] = json!(issued);
+        invalid["exp"] = json!(expires);
+        let token = mint(&f, invalid, false, "RS256").await;
+        assert!(f.identity.workload(org, &token, &scope).await.is_err());
+        assert_eq!(
+            request(
+                &f,
+                "GET",
+                &format!("/v1/orgs/{org}/policies/{}", scope.policy),
+                None,
+                Some(&token),
+                None,
+                Value::Null,
+            )
+            .await
+            .0,
+            401
+        );
+    }
     for (bad, alg) in [(true, "RS256"), (false, "none")] {
         let token = mint(&f, claims.clone(), bad, alg).await;
         assert!(f.identity.workload(org, &token, &scope).await.is_err());

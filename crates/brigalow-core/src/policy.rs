@@ -7,6 +7,16 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
+/// Verified-claim name recording a non-default workload provider profile. GitHub and other
+/// existing principals never carry it, so their behaviour is unchanged.
+pub const PROVIDER_CLAIM: &str = "provider";
+/// Principals from a non-default provider profile (currently GitLab) have no reviewed
+/// protected-ref, workflow or provenance contract. They may use only test-purpose policies
+/// without attestation; every other combination fails closed, whatever the provider value.
+pub fn provider_allows(policy: &Policy, principal: &Principal) -> bool {
+    !principal.claims.contains_key(PROVIDER_CLAIM)
+        || (policy.purpose == Purpose::Test && !policy.attestation)
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
@@ -87,6 +97,9 @@ impl Policy {
         }
         if !principal.permits_scope(self.project, Some(self.id)) {
             return Err("scope".into());
+        }
+        if !provider_allows(self, principal) {
+            return Err("provider_purpose".into());
         }
         if !self.valid()
             || self.key != key.key.id
@@ -181,6 +194,114 @@ impl RequestState {
             Self::Rejected => "rejected",
             Self::AwaitingApproval => "awaiting_approval",
             Self::Expired => "expired",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        keys::{Key, KeyState},
+        rbac::{Role, Scope},
+        TrustTier,
+    };
+    fn fixture(purpose: Purpose, attestation: bool) -> (Policy, KeyRecord, Principal) {
+        let project = Uuid::new_v4();
+        let key = KeyRecord {
+            key: Key {
+                id: Uuid::new_v4(),
+                algorithm: Algorithm::P256,
+                purpose,
+            },
+            project,
+            backend: "hsm".into(),
+            state: KeyState::Active,
+            offline: false,
+            trust: TrustTier::Private,
+            anchor: None,
+            public_key: vec![],
+            chain: vec![],
+            revision: 0,
+        };
+        let verified = [
+            ("iss", "https://ci.test"),
+            ("sub", "job"),
+            ("repository", "acme/app"),
+            ("ref", "refs/heads/main"),
+            ("environment", "release"),
+            ("ref_protected", "true"),
+            ("sha", "0123456789abcdef0123456789abcdef01234567"),
+            ("workflow", "build"),
+        ];
+        let policy = Policy {
+            id: Uuid::new_v4(),
+            name: "policy".into(),
+            project,
+            key: key.key.id,
+            purpose,
+            claims: verified[2..6]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            algorithms: vec![Algorithm::P256],
+            timestamp: Timestamp::Disabled,
+            approval: None,
+            gates: vec![],
+            attestation,
+        };
+        let principal = Principal {
+            org_id: Uuid::nil(),
+            actor: "workload".into(),
+            roles: vec![Role::Submitter],
+            scope: Some(Scope {
+                project,
+                policy: policy.id,
+            }),
+            human: false,
+            claims: verified
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        };
+        (policy, key, principal)
+    }
+    #[test]
+    fn existing_principals_keep_release_and_attestation() {
+        for (purpose, attestation) in [
+            (Purpose::Release, false),
+            (Purpose::Release, true),
+            (Purpose::Test, true),
+            (Purpose::Test, false),
+        ] {
+            let (policy, key, principal) = fixture(purpose, attestation);
+            assert_eq!(policy.authorise(&key, &principal, false), Ok(()));
+        }
+    }
+    #[test]
+    fn provider_profiles_are_test_only_without_attestation() {
+        // Even a principal that would otherwise satisfy every release claim fails closed.
+        for provider in ["gitlab", "github", "", "unknown"] {
+            for (purpose, attestation) in [
+                (Purpose::Release, false),
+                (Purpose::Release, true),
+                (Purpose::Test, true),
+            ] {
+                let (policy, key, mut principal) = fixture(purpose, attestation);
+                principal
+                    .claims
+                    .insert(PROVIDER_CLAIM.into(), provider.into());
+                assert!(!provider_allows(&policy, &principal));
+                assert_eq!(
+                    policy.authorise(&key, &principal, false),
+                    Err("provider_purpose".into())
+                );
+            }
+            let (policy, key, mut principal) = fixture(Purpose::Test, false);
+            principal
+                .claims
+                .insert(PROVIDER_CLAIM.into(), provider.into());
+            assert_eq!(policy.authorise(&key, &principal, false), Ok(()));
         }
     }
 }

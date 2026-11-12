@@ -20,12 +20,19 @@ impl Identity {
                 .workloads
                 .iter()
                 .find(|r| r.project == scope.project && r.policy == scope.policy)?;
-            let (name, _) = rule
+            let name = match rule
                 .claims
                 .iter()
-                .find(|(k, v)| claims.get(*k).and_then(|c| c.as_str()) != Some(v.as_str()))?;
+                .find(|(k, v)| claims.get(*k).and_then(|c| c.as_str()) != Some(v.as_str()))
+            {
+                Some((name, _)) => name.clone(),
+                None => match (a.provider, &rule.gitlab) {
+                    (Provider::Gitlab, Some(g)) => gitlab::normalise(g, &claims).err()?.into(),
+                    _ => return None,
+                },
+            };
             let p = Self::principal(a, &claims, vec![], None, false).ok()?;
-            return Some((p.actor, name.clone()));
+            return Some((p.actor, name));
         }
         None
     }
@@ -66,17 +73,25 @@ impl Identity {
         if issued > now() + 30 || !(1..=3600).contains(&lifetime) {
             return Err(AuthError);
         }
-        let rule = a
+        // Each rule is checked in full; GitLab rules also yield their normalised claim set.
+        let (rule, normalised) = a
             .workloads
             .iter()
-            .find(|r| {
+            .filter(|r| {
                 scope.is_none_or(|scope| r.project == scope.project && r.policy == scope.policy)
                     && r.claims
                         .iter()
                         .all(|(k, v)| claims.get(k).and_then(|c| c.as_str()) == Some(v.as_str()))
             })
+            .find_map(|r| match (a.provider, &r.gitlab) {
+                (Provider::Github, None) => Some((r, None)),
+                (Provider::Gitlab, Some(g)) => {
+                    gitlab::normalise(g, &claims).ok().map(|c| (r, Some(c)))
+                }
+                _ => None,
+            })
             .ok_or(AuthError)?;
-        Self::principal(
+        let mut principal = Self::principal(
             a,
             &claims,
             vec![Role::Submitter],
@@ -85,6 +100,11 @@ impl Identity {
                 policy: rule.policy,
             }),
             false,
-        )
+        )?;
+        if let Some(normalised) = normalised {
+            // Replace the GitHub-shaped copy entirely; only normalised GitLab claims remain.
+            principal.claims = normalised;
+        }
+        Ok(principal)
     }
 }

@@ -1,3 +1,4 @@
+pub mod gitlab;
 pub mod oidc;
 pub mod workload;
 use crate::config::Mode;
@@ -28,7 +29,23 @@ pub struct HumanConfig {
 pub struct WorkloadRule {
     pub project: Uuid,
     pub policy: Uuid,
+    /// Exact raw JSON-string claims. Required for GitHub; must be empty for GitLab, whose
+    /// typed rule matches signed claims before normalisation (raw `ref` is a short name).
+    #[serde(default)]
     pub claims: BTreeMap<String, String>,
+    /// Required on, and only allowed on, a `provider = "gitlab"` authority.
+    #[serde(default)]
+    pub gitlab: Option<gitlab::GitlabRule>,
+}
+/// Operator-selected workload token profile. Never inferred from token contents or host.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
+    /// Existing behaviour: exact raw claim rules and the fixed GitHub-shaped claim set.
+    #[default]
+    Github,
+    /// GitLab CI ID tokens (18.4+ claim set), test-purpose policies only.
+    Gitlab,
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +54,8 @@ pub struct Authority {
     pub name: String,
     pub issuer: String,
     pub jwks_url: String,
+    #[serde(default)]
+    pub provider: Provider,
     pub human: Option<HumanConfig>,
     #[serde(default)]
     pub workloads: Vec<WorkloadRule>,
@@ -114,9 +133,30 @@ impl Identity {
                 }
             }
             for r in &a.workloads {
-                if r.claims.is_empty() {
+                let valid = match (a.provider, &r.gitlab) {
+                    (Provider::Github, None) => !r.claims.is_empty(),
+                    (Provider::Gitlab, Some(g)) => r.claims.is_empty() && g.valid(),
+                    _ => false,
+                };
+                if !valid {
                     return Err(AuthError);
                 }
+            }
+        }
+        // Workload verification selects the first authority by (org, issuer); one issuer must
+        // not be configured under two profiles, or the chosen profile would depend on order.
+        for a in config
+            .authorities
+            .iter()
+            .filter(|a| !a.workloads.is_empty())
+        {
+            if config.authorities.iter().any(|b| {
+                !b.workloads.is_empty()
+                    && b.org_id == a.org_id
+                    && b.issuer == a.issuer
+                    && b.provider != a.provider
+            }) {
+                return Err(AuthError);
             }
         }
         let mut builder = reqwest::Client::builder()

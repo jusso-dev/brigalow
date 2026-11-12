@@ -28,6 +28,7 @@ Verification uses independent tools where possible (OpenSSL), so we aren't only 
 - **AT-ID-01 Human OIDC.** Against a local test IdP container, sign-in with PKCE works; a token with wrong `aud` or expired `exp` is rejected; group claim maps to the configured role.
 - **AT-ID-02 Workload OIDC.** With a local JWKS server, a correctly signed CI token matching a submitter rule is accepted. Rejected: unknown issuer, bad signature, `alg: none`, wrong audience, expired, claim mismatch on repo, ref or environment.
 - **AT-ID-03 Replay.** Reusing a request ID returns 409. A token past expiry is rejected even if previously accepted.
+- **AT-ID-04 GitLab workload profile (test purpose only).** An authority explicitly configured with `provider = "gitlab"` accepts a correctly signed generated token whose job and source project ID/path, fully-qualified `ref_path` with consistent `ref_type`/`ref`, `ref_protected = "true"`, allowed `pipeline_source`, configured environment and `sha` match the rule exactly; it signs only with a `test` policy without attestation. Rejected: wrong issuer, audience or key, `alg: none`, expiry/nbf, a 3601-second lifetime, short or mismatched ref, unprotected ref, missing or wrong environment, missing or wrong job/source project ID or path, mixed job/source project, merge-request pipeline source, changed claim types, and GitLab tokens carrying GitHub-shaped canonical claims (`repository`, `workflow`, `provider`). Release and attestation-enabled policies reject GitLab principals with no backend call. Cross-tenant IDs return 404; a reused request ID returns 409. GitHub principals are unchanged.
 
 ## Keys and certificates
 
@@ -85,6 +86,10 @@ Verification uses independent tools where possible (OpenSSL), so we aren't only 
 ## Phase 1 automation
 
 `crates/brigalow-server/tests/identity.rs`, under the integration feature, exercises the actual axum router against the HTTPS Compose IdP/JWKS and real Postgres. AT-ID-01 covers PKCE, browser-bound single-use state, nonce, audience, expiry and mapped group permissions. AT-ID-02 covers valid workload claims, unknown issuer, signature/algorithm attacks, audience/expiry/nbf and repository/ref/environment/workflow mismatches. AT-ID-03 rechecks expiry after a prior success and rejects duplicate project request IDs with 409. AT-WEB-01 covers CSRF, cookie attributes, CSP, nosniff and Askama escaping. AT-TEN-01 generates object and mutation route checks from the registries used by router construction. API-token tests assert hashed storage, scope, expiry requirement and revocation. Pure RBAC tests enforce custodian separation.
+
+## GitLab workload profile automation
+
+`at_id_04_gitlab_profile_is_exact_and_test_purpose_only` in `crates/brigalow-server/tests/identity.rs` (integration feature) configures GitLab authorities on two fresh organisations against the existing HTTPS Compose IdP. Every token is minted at run time with the IdP's in-memory generated key; no JWT or key is checked in. The test covers every AT-ID-04 rejection through both `Identity::workload` and the signing route (401), asserts the normalised claim set, verifies the test-purpose raw signature with OpenSSL, checks request-ID replay (409), cross-tenant project/policy IDs (404) and audited `claim:pipeline_source` rejection, confirms planted release and attestation policies reject as `provider_purpose` with zero backend signing calls, and asserts a same-issuer GitHub token still yields exactly the original claim set. Pure checks are unit-tested in `brigalow-server` (`auth::gitlab`) and `brigalow-core` (`policy::tests`). This is generated-fixture evidence of the documented GitLab claim contract, not qualification against a real GitLab instance.
 
 ## Phase 2 automation
 

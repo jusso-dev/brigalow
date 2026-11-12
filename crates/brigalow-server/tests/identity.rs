@@ -7,7 +7,10 @@ use axum::{
 use brigalow_core::rbac::{Role, Scope};
 use brigalow_server::{
     application,
-    auth::{self, Authority, HumanConfig, Identity, IdentityConfig, WorkloadRule},
+    auth::{
+        self, gitlab::GitlabRule, Authority, HumanConfig, Identity, IdentityConfig, Provider,
+        WorkloadRule,
+    },
     config::Mode,
     web::{OBJECT_ROUTES, TENANT_MUTATIONS},
     AppState,
@@ -138,6 +141,7 @@ async fn fixture() -> Fixture {
                 } else {
                     format!("{issuer}/jwks")
                 },
+                provider: Provider::Github,
                 human: Some(HumanConfig {
                     client_id: client.into(),
                     authorization_url: format!("{issuer}/authorize"),
@@ -154,6 +158,7 @@ async fn fixture() -> Fixture {
                             ("environment".into(), "release".into()),
                             ("workflow".into(), "build".into()),
                         ]),
+                        gitlab: None,
                     }]
                 } else {
                     vec![]
@@ -1756,9 +1761,16 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
 }
 
 async fn role_session(f: &Fixture, actor: &str, roles: Vec<Role>) -> (String, String) {
+    role_session_in(f, f.orgs[0], actor, roles).await
+}
+async fn role_session_in(
+    f: &Fixture,
+    org: Uuid,
+    actor: &str,
+    roles: Vec<Role>,
+) -> (String, String) {
     let secret = auth::random_secret();
     let csrf = auth::random_secret();
-    let org = f.orgs[0];
     let p = brigalow_core::rbac::Principal {
         org_id: org,
         actor: actor.into(),
@@ -3011,6 +3023,560 @@ async fn at_ops_02_per_credential_rate_limits_and_audit() {
 #[cfg(feature = "tool-tests")]
 #[path = "support/csc.rs"]
 mod csc;
+
+/// AT-ID-04: explicit GitLab profile, generated-key HTTPS issuer, test-purpose signing only.
+#[tokio::test]
+async fn at_id_04_gitlab_profile_is_exact_and_test_purpose_only() {
+    use brigalow_core::{
+        keys::KeyRecord,
+        policy::{Policy, RequestState, SignRequest},
+    };
+    let mut f = fixture().await;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    f.keys.backend = Arc::new(CountSigning {
+        backend: f.keys.backend.clone(),
+        calls: calls.clone(),
+    });
+    // Fresh organisations: no GitHub authority shares their issuer, and the fixture's GitHub
+    // authorities for f.orgs stay byte-for-byte as before.
+    let orgs = [Uuid::new_v4(), Uuid::new_v4()];
+    let rule = GitlabRule {
+        project_id: "4242".into(),
+        project_path: "platform/app".into(),
+        ref_path: "refs/heads/main".into(),
+        pipeline_sources: vec!["push".into()],
+        environment: Some("signing-test".into()),
+    };
+    let mut projects = Vec::new();
+    let mut keys = Vec::new();
+    let mut policies: Vec<[Uuid; 3]> = Vec::new();
+    for org in orgs {
+        sqlx::query("INSERT INTO brigalow.organisations VALUES ($1,'gitlab-test')")
+            .bind(org)
+            .execute(&f.admin)
+            .await
+            .unwrap();
+        projects.push(
+            f.store
+                .tenant(org)
+                .create_project("gitlab", "project")
+                .await
+                .unwrap(),
+        );
+    }
+    // Rebuild the router so the counting backend is the one used for signing.
+    f.router = application(AppState {
+        rate_limit: Default::default(),
+        gates: Default::default(),
+        notifications: Default::default(),
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    for (i, org) in orgs.iter().copied().enumerate() {
+        let project = projects[i];
+        let custodian =
+            role_session_in(&f, org, "gitlab-custodian", vec![Role::KeyCustodian]).await;
+        let admin = role_session_in(&f, org, "gitlab-admin", vec![Role::OrgAdmin]).await;
+        let result = json_as(
+            &f,
+            &format!("/v1/orgs/{org}/projects/{project}/keys"),
+            &custodian,
+            json!({"algorithm":"p256","purpose":"test","offline":false}),
+        )
+        .await;
+        assert_eq!(result.0, 201);
+        let key: KeyRecord = serde_json::from_str(&result.2).unwrap();
+        assert_eq!(
+            json_as(
+                &f,
+                &format!("/v1/orgs/{org}/keys/{}/activate", key.key.id),
+                &custodian,
+                json!({})
+            )
+            .await
+            .0,
+            200
+        );
+        let path = format!("/v1/orgs/{org}/projects/{project}/policies");
+        let mut ids = [Uuid::nil(); 3];
+        for (j, (name, attestation)) in [("gitlab-test", false), ("gitlab-attest", true)]
+            .into_iter()
+            .enumerate()
+        {
+            let result = json_as(&f, &path, &admin, json!({"name":name,"key":key.key.id,"purpose":"test","claims":{},"algorithms":["p256"],"timestamp":"disabled","attestation":attestation})).await;
+            assert_eq!(result.0, 201, "{}", result.2);
+            ids[j] = serde_json::from_str::<Policy>(&result.2).unwrap().id;
+        }
+        // Lab mode cannot bind a release key, so plant a release policy directly: GitLab
+        // principals must be refused before key binding is even considered.
+        let release = Policy {
+            id: Uuid::new_v4(),
+            name: "gitlab-release".into(),
+            project,
+            key: key.key.id,
+            purpose: brigalow_core::Purpose::Release,
+            claims: BTreeMap::from([
+                ("repository".into(), "platform/app".into()),
+                ("ref".into(), "refs/heads/main".into()),
+                ("environment".into(), "signing-test".into()),
+                ("ref_protected".into(), "true".into()),
+            ]),
+            algorithms: vec![brigalow_core::keys::Algorithm::P256],
+            timestamp: brigalow_core::policy::Timestamp::Disabled,
+            approval: None,
+            gates: vec![],
+            attestation: false,
+        };
+        sqlx::query("INSERT INTO brigalow.policies (org_id,id,project_id,key_id,name,record) VALUES ($1,$2,$3,$4,$5,$6)")
+            .bind(org)
+            .bind(release.id)
+            .bind(project)
+            .bind(key.key.id)
+            .bind(&release.name)
+            .bind(sqlx::types::Json(&release))
+            .execute(&f.admin)
+            .await
+            .unwrap();
+        ids[2] = release.id;
+        policies.push(ids);
+        keys.push(key);
+    }
+    let mut config = f.identity.config.clone();
+    for (i, org) in orgs.iter().enumerate() {
+        config.authorities.push(Authority {
+            org_id: *org,
+            name: "gitlab".into(),
+            issuer: f.issuer.clone(),
+            jwks_url: format!("{}/jwks", f.issuer),
+            provider: Provider::Gitlab,
+            human: None,
+            workloads: policies[i]
+                .iter()
+                .map(|policy| WorkloadRule {
+                    project: projects[i],
+                    policy: *policy,
+                    claims: BTreeMap::new(),
+                    gitlab: Some(rule.clone()),
+                })
+                .collect(),
+        });
+    }
+    // One issuer under two profiles in one organisation is ambiguous and refused.
+    let mut mixed = config.clone();
+    let mut github = mixed.authorities.last().unwrap().clone();
+    github.name = "github-same-issuer".into();
+    github.provider = Provider::Github;
+    github.workloads = vec![WorkloadRule {
+        project: projects[1],
+        policy: policies[1][0],
+        claims: BTreeMap::from([("repository".into(), "platform/app".into())]),
+        gitlab: None,
+    }];
+    mixed.authorities.push(github);
+    assert!(Identity::new(mixed, Mode::Lab).is_err());
+    f.identity = Identity::new(config, Mode::Lab).unwrap();
+    f.router = application(AppState {
+        rate_limit: Default::default(),
+        gates: Default::default(),
+        notifications: Default::default(),
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    let org = orgs[0];
+    let project = projects[0];
+    let [test_policy, attest_policy, release_policy] = policies[0];
+    let submit = format!("/v1/orgs/{org}/projects/{project}/sign-requests");
+    let digest = vec![9u8; 32];
+    let input = |policy: Uuid| json!({"request_id":Uuid::new_v4(),"policy":policy,"digest_alg":"sha256","digest":digest,"artifact_name":"gitlab.bin","format":"raw","metadata":{"repository":"attacker/repo","ref_path":"refs/heads/main","pipeline_source":"push"}});
+    let claims = json!({
+        "aud": format!("brigalow:{org}"),
+        "sub": "project_path:platform/app:ref_type:branch:ref:main",
+        "namespace_id": "17",
+        "namespace_path": "platform",
+        "project_id": "4242",
+        "project_path": "platform/app",
+        "job_project_id": "4242",
+        "job_project_path": "platform/app",
+        "user_id": "5",
+        "user_login": "builder",
+        "pipeline_id": "1001",
+        "pipeline_source": "push",
+        "job_id": "2002",
+        "ref": "main",
+        "ref_type": "branch",
+        "ref_path": "refs/heads/main",
+        "ref_protected": "true",
+        "environment": "signing-test",
+        "environment_protected": "true",
+        "sha": "714a629c0b401fdce83e847fc9589983fc6f46bc",
+        "ci_config_ref_uri": "gitlab.test/platform/app//.gitlab-ci.yml@refs/heads/main",
+        "ci_config_sha": "714a629c0b401fdce83e847fc9589983fc6f46bc",
+        "runner_id": 1,
+        "runner_environment": "self-hosted"
+    });
+    let scope = Scope {
+        project,
+        policy: test_policy,
+    };
+    let valid = mint(&f, claims.clone(), false, "RS256").await;
+    let principal = f.identity.workload(org, &valid, &scope).await.unwrap();
+    assert_eq!(principal.claims["provider"], "gitlab");
+    assert_eq!(principal.claims["ref"], "refs/heads/main");
+    assert_eq!(principal.claims["sha"], claims["sha"]);
+    for absent in [
+        "repository",
+        "workflow",
+        "ref_protected",
+        "ci_config_ref_uri",
+    ] {
+        assert!(!principal.claims.contains_key(absent), "{absent} mapped");
+    }
+    // Test-purpose signing succeeds; metadata never becomes a verified claim.
+    let body = input(test_policy);
+    let result = request(&f, "POST", &submit, None, Some(&valid), None, body.clone()).await;
+    assert_eq!(result.0, 201, "{}", result.2);
+    let signed: SignRequest = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(signed.state, RequestState::Signed);
+    assert_eq!(signed.verified_claims, principal.claims);
+    assert!(signed.attestation.is_none());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("public.der"), &keys[0].public_key).unwrap();
+    std::fs::write(dir.path().join("digest"), &digest).unwrap();
+    std::fs::write(dir.path().join("signature"), signed.output.unwrap()).unwrap();
+    openssl_in(
+        dir.path(),
+        &[
+            "pkeyutl",
+            "-verify",
+            "-pubin",
+            "-inkey",
+            "public.der",
+            "-keyform",
+            "DER",
+            "-sigfile",
+            "signature",
+            "-in",
+            "digest",
+            "-pkeyopt",
+            "digest:sha256",
+        ],
+    );
+    // Request IDs remain single-use.
+    assert_eq!(
+        request(&f, "POST", &submit, None, Some(&valid), None, body)
+            .await
+            .0,
+        409
+    );
+    // Attestation-enabled and release policies fail closed with zero backend calls.
+    for policy in [attest_policy, release_policy] {
+        let token = mint(&f, claims.clone(), false, "RS256").await;
+        let scope = Scope { project, policy };
+        assert!(f.identity.workload(org, &token, &scope).await.is_ok());
+        let body = input(policy);
+        let id: Uuid = serde_json::from_value(body["request_id"].clone()).unwrap();
+        let before = calls.load(std::sync::atomic::Ordering::SeqCst);
+        let result = request(&f, "POST", &submit, None, Some(&token), None, body).await;
+        assert_eq!(result.0, 403);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), before);
+        let stored = f.store.tenant(org).sign_request(id).await.unwrap().unwrap();
+        assert_eq!(stored.state, RequestState::Rejected);
+        assert_eq!(stored.failure.as_deref(), Some("provider_purpose"));
+        assert!(stored.output.is_none() && stored.attestation.is_none());
+    }
+    // Every case is a correctly formed, signed token apart from the named change.
+    let now = auth::now();
+    let cases: Vec<(&str, Value, bool, &str)> = vec![
+        (
+            "wrong issuer",
+            json!({"iss":"https://unknown.invalid"}),
+            false,
+            "RS256",
+        ),
+        (
+            "wrong audience",
+            json!({"aud":"brigalow:other"}),
+            false,
+            "RS256",
+        ),
+        (
+            "foreign tenant audience",
+            json!({"aud":format!("brigalow:{}", orgs[1])}),
+            false,
+            "RS256",
+        ),
+        ("wrong key", json!({}), true, "RS256"),
+        ("alg none", json!({}), false, "none"),
+        ("expired", json!({"exp":now - 1}), false, "RS256"),
+        ("not yet valid", json!({"nbf":now + 300}), false, "RS256"),
+        (
+            "3601s lifetime",
+            json!({"iat":now,"exp":now + 3601}),
+            false,
+            "RS256",
+        ),
+        ("short ref_path", json!({"ref_path":"main"}), false, "RS256"),
+        (
+            "qualified short ref",
+            json!({"ref":"refs/heads/main"}),
+            false,
+            "RS256",
+        ),
+        (
+            "other branch",
+            json!({"ref":"feature","ref_path":"refs/heads/feature"}),
+            false,
+            "RS256",
+        ),
+        (
+            "ref_type mismatch",
+            json!({"ref_type":"tag"}),
+            false,
+            "RS256",
+        ),
+        (
+            "unprotected ref",
+            json!({"ref_protected":"false"}),
+            false,
+            "RS256",
+        ),
+        (
+            "bool ref_protected",
+            json!({"ref_protected":true}),
+            false,
+            "RS256",
+        ),
+        (
+            "missing environment",
+            json!({"environment":null}),
+            false,
+            "RS256",
+        ),
+        (
+            "wrong environment",
+            json!({"environment":"production"}),
+            false,
+            "RS256",
+        ),
+        (
+            "missing job project id",
+            json!({"job_project_id":null}),
+            false,
+            "RS256",
+        ),
+        (
+            "missing job project path",
+            json!({"job_project_path":null}),
+            false,
+            "RS256",
+        ),
+        (
+            "wrong job project id",
+            json!({"job_project_id":"4243"}),
+            false,
+            "RS256",
+        ),
+        (
+            "wrong project path",
+            json!({"project_path":"platform/other"}),
+            false,
+            "RS256",
+        ),
+        (
+            "mixed job/source project",
+            json!({"project_id":"99","project_path":"fork/app"}),
+            false,
+            "RS256",
+        ),
+        (
+            "merge request source",
+            json!({"pipeline_source":"merge_request_event"}),
+            false,
+            "RS256",
+        ),
+        (
+            "numeric project id",
+            json!({"project_id":4242,"job_project_id":4242}),
+            false,
+            "RS256",
+        ),
+        (
+            "array environment",
+            json!({"environment":["signing-test"]}),
+            false,
+            "RS256",
+        ),
+        ("numeric sha", json!({"sha":12345}), false, "RS256"),
+        ("short sha", json!({"sha":"714a629"}), false, "RS256"),
+        (
+            "canonical repository",
+            json!({"repository":"platform/app"}),
+            false,
+            "RS256",
+        ),
+        (
+            "canonical workflow",
+            json!({"workflow":".gitlab-ci.yml"}),
+            false,
+            "RS256",
+        ),
+        (
+            "spoofed provider",
+            json!({"provider":"github"}),
+            false,
+            "RS256",
+        ),
+    ];
+    // JSON null in a change removes the claim; a literal null claim is tested separately.
+    let mut null_environment = claims.clone();
+    null_environment["environment"] = Value::Null;
+    for (name, change, bad, alg) in cases {
+        let mut invalid = claims.clone();
+        for (k, v) in change.as_object().unwrap() {
+            if v.is_null() {
+                invalid.as_object_mut().unwrap().remove(k);
+            } else {
+                invalid[k] = v.clone();
+            }
+        }
+        let token = mint(&f, invalid, bad, alg).await;
+        assert!(
+            f.identity.workload(org, &token, &scope).await.is_err(),
+            "accepted {name}"
+        );
+        assert_eq!(
+            request(
+                &f,
+                "POST",
+                &submit,
+                None,
+                Some(&token),
+                None,
+                input(test_policy)
+            )
+            .await
+            .0,
+            401,
+            "{name}"
+        );
+    }
+    let token = mint(&f, null_environment, false, "RS256").await;
+    assert!(f.identity.workload(org, &token, &scope).await.is_err());
+    // Profile claim failures are audited by name after reverification.
+    let mut merge = claims.clone();
+    merge["pipeline_source"] = json!("merge_request_event");
+    let token = mint(&f, merge, false, "RS256").await;
+    let body = input(test_policy);
+    let id = body["request_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        request(&f, "POST", &submit, None, Some(&token), None, body)
+            .await
+            .0,
+        401
+    );
+    assert!(f
+        .store
+        .tenant(org)
+        .audit_page(0, 1000)
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.subject == id
+            && e.action == "request.rejected"
+            && e.details["reason"] == "claim:pipeline_source"));
+    // Cross-tenant object IDs are 404 under the authenticated organisation.
+    let foreign = format!("/v1/orgs/{org}/projects/{}/sign-requests", projects[1]);
+    for (path, policy) in [(&foreign, policies[1][0]), (&submit, policies[1][0])] {
+        assert_eq!(
+            request(&f, "POST", path, None, Some(&valid), None, input(policy))
+                .await
+                .0,
+            404
+        );
+    }
+    assert_eq!(
+        request(
+            &f,
+            "GET",
+            &format!("/v1/orgs/{org}/policies/{}", policies[1][0]),
+            None,
+            Some(&valid),
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        404
+    );
+    // The other tenant's routes have no authority for this token's audience.
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &format!(
+                "/v1/orgs/{}/projects/{}/sign-requests",
+                orgs[1], projects[1]
+            ),
+            None,
+            Some(&valid),
+            None,
+            input(policies[1][0])
+        )
+        .await
+        .0,
+        401
+    );
+    // GitHub authorities are unchanged: a GitLab-shaped token cannot satisfy them, and a
+    // GitHub token still yields the original claim set without a provider marker.
+    let github_scope = Scope {
+        project: f.objects[0][0],
+        policy: f.objects[0][2],
+    };
+    let mut gitlab_for_github = claims.clone();
+    gitlab_for_github["aud"] = json!(format!("brigalow:{}", f.orgs[0]));
+    let token = mint(&f, gitlab_for_github, false, "RS256").await;
+    assert!(f
+        .identity
+        .workload(f.orgs[0], &token, &github_scope)
+        .await
+        .is_err());
+    let token = mint(&f, json!({"aud":format!("brigalow:{}", f.orgs[0]),"repository":"acme/app","ref":"refs/heads/main","environment":"release","workflow":"build","ref_protected":true}), false, "RS256").await;
+    let github = f
+        .identity
+        .workload(f.orgs[0], &token, &github_scope)
+        .await
+        .unwrap();
+    assert_eq!(
+        github.claims,
+        BTreeMap::from(
+            [
+                ("iss", f.issuer.as_str()),
+                ("sub", "test-workload"),
+                ("repository", "acme/app"),
+                ("ref", "refs/heads/main"),
+                ("environment", "release"),
+                ("workflow", "build"),
+                ("ref_protected", "true"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        )
+    );
+    // Expiry is rechecked after an earlier success.
+    let mut short = claims;
+    short["exp"] = json!(auth::now() + 2);
+    let token = mint(&f, short, false, "RS256").await;
+    assert!(f.identity.workload(org, &token, &scope).await.is_ok());
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(f.identity.workload(org, &token, &scope).await.is_err());
+    f.store.close().await;
+    f.admin.close().await;
+}
 
 /// AT-REC-01: interrupted `gating`/`signing` requests are inspectable read-only by
 /// human org admins/auditors; inspection mutates nothing and never reaches the backend.

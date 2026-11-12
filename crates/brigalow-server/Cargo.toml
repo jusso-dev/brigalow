@@ -39,9 +39,15 @@ subtle = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 oauth2 = { version = "5", default-features = false }
 jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs"] }
+# Same AWS-LC library already used by jsonwebtoken; AEAD for pending-login state only.
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys", "alloc"] }
 askama = { version = "0.16.1", default-features = false, features = ["derive", "std"] }
 url = "2"
 futures-util = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+# Safe no-replace directory rename (renameat2 / renameatx_np); unsafe code stays forbidden.
+rustix = { version = "1.1.6", default-features = false, features = ["fs", "process", "std"] }
 
 [features]
 integration = []

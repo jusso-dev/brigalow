@@ -209,3 +209,38 @@ impl Tenant {
         Ok(())
     }
 }
+impl Tenant {
+    /// Read-only incident evidence: one request plus a bounded slice of its audit events.
+    /// Takes no locks and writes nothing; returns `(request, [(seq, at, action)], truncated)`.
+    pub async fn inspect_request(
+        &self,
+        id: Uuid,
+        limit: usize,
+    ) -> Result<Option<(SignRequest, Vec<(i64, i64, String)>, bool)>, Error> {
+        let mut tx = self.begin().await?;
+        let row: Option<Option<Json<SignRequest>>> = sqlx::query_scalar(
+            "SELECT record FROM brigalow.sign_requests WHERE org_id=$1 AND id=$2",
+        )
+        .bind(self.org_id)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(request) = row.flatten().map(|v| v.0) else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let limit = limit.clamp(1, 1000);
+        let mut events: Vec<(i64, i64, String)> = sqlx::query_as(
+            "SELECT seq, (entry->>'at')::bigint, entry->>'action' FROM brigalow.audit_entries WHERE org_id=$1 AND entry->>'subject'=$2 ORDER BY seq LIMIT $3",
+        )
+        .bind(self.org_id)
+        .bind(id.to_string())
+        .bind(limit as i64 + 1)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let truncated = events.len() > limit;
+        events.truncate(limit);
+        Ok(Some((request, events, truncated)))
+    }
+}

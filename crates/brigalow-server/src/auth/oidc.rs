@@ -1,16 +1,11 @@
 use super::*;
-use oauth2::{
-    basic::BasicClient, AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier,
-    RedirectUrl, Scope,
+use brigalow_store::{
+    login::{NewPendingLogin, Sealed},
+    Store,
 };
-pub(super) struct Pending {
-    org: Uuid,
-    provider: String,
-    browser_hash: String,
-    nonce: String,
-    pkce: PkceCodeVerifier,
-    expires: Instant,
-}
+use oauth2::{
+    basic::BasicClient, AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope,
+};
 pub struct Login {
     pub url: String,
     pub browser: String,
@@ -24,7 +19,12 @@ impl Identity {
             a.name
         )
     }
-    pub async fn login(&self, org: Uuid, provider: &str) -> Result<Login, AuthError> {
+    pub async fn login(
+        &self,
+        store: &Store,
+        org: Uuid,
+        provider: &str,
+    ) -> Result<Login, AuthError> {
         let a = self.authority(org, provider)?;
         let h = a.human.as_ref().ok_or(AuthError)?;
         let client = BasicClient::new(ClientId::new(h.client_id.clone()))
@@ -40,22 +40,43 @@ impl Identity {
             .set_pkce_challenge(challenge)
             .url();
         let browser = random_secret();
-        let mut pending = self.pending.lock().await;
-        pending.retain(|_, p| p.expires > Instant::now());
-        if pending.len() >= 1024 {
-            return Err(AuthError);
-        }
-        pending.insert(
-            hash(state.secret()),
-            Pending {
-                org,
-                provider: provider.into(),
-                browser_hash: hash(&browser),
-                nonce,
-                pkce,
-                expires: Instant::now() + Duration::from_secs(300),
-            },
-        );
+        let keys = self.login_keys.as_ref().ok_or(AuthError)?;
+        let state_hash = hash(state.secret());
+        let key_id = keys.active_id().to_owned();
+        let secrets = login_keys::encode_secrets(pkce.secret(), &nonce)?;
+        let browser_hash = hash(&browser);
+        // DB failure or exhausted bounds reject the login; there is no in-memory fallback.
+        store
+            .tenant(org)
+            .create_pending_login(
+                NewPendingLogin {
+                    state_hash: &state_hash,
+                    provider,
+                    browser_hash: &browser_hash,
+                    key_id: &key_id,
+                    version: i16::from(login_keys::VERSION),
+                },
+                self.pending_limits,
+                |expires_ms| {
+                    let aad = login_keys::aad(
+                        org,
+                        provider,
+                        &state_hash,
+                        &browser_hash,
+                        expires_ms,
+                        &key_id,
+                    );
+                    let (nonce, ciphertext) = keys
+                        .seal(&aad, &secrets)
+                        .map_err(|_| brigalow_store::Error::Invalid)?;
+                    Ok(Sealed {
+                        nonce: nonce.to_vec(),
+                        ciphertext,
+                    })
+                },
+            )
+            .await
+            .map_err(|_| AuthError)?;
         Ok(Login {
             url: url.into(),
             browser,
@@ -63,6 +84,7 @@ impl Identity {
     }
     pub async fn complete(
         &self,
+        store: &Store,
         org: Uuid,
         provider: &str,
         state: &str,
@@ -73,19 +95,35 @@ impl Identity {
         if state.len() > 256 || code.len() > 4096 || browser.len() > 256 {
             return Err(AuthError);
         }
-        let mut pending = self.pending.lock().await;
-        let key = hash(state);
-        let p = pending.get(&key).ok_or(AuthError)?;
-        if p.org != org
-            || p.provider != provider
-            || p.expires <= Instant::now()
-            || !bool::from(p.browser_hash.as_bytes().ct_eq(hash(browser).as_bytes()))
-        {
-            return Err(AuthError);
-        }
-        let p = pending.remove(&key).ok_or(AuthError)?;
-        drop(pending);
         let a = self.authority(org, provider)?;
+        let keys = self.login_keys.as_ref().ok_or(AuthError)?;
+        let state_hash = hash(state);
+        let browser_hash = hash(browser);
+        // Tenant RLS transaction: lock the exact row; only a matching browser/provider whose
+        // ciphertext authenticates commits the consumption, before any token exchange.
+        let secrets = store
+            .tenant(org)
+            .consume_pending_login(&state_hash, |p| {
+                if p.provider != provider
+                    || p.version != i16::from(login_keys::VERSION)
+                    || !bool::from(p.browser_hash.as_bytes().ct_eq(browser_hash.as_bytes()))
+                {
+                    return None;
+                }
+                let aad = login_keys::aad(
+                    org,
+                    provider,
+                    &state_hash,
+                    &p.browser_hash,
+                    p.expires_ms,
+                    &p.key_id,
+                );
+                keys.open(&p.key_id, &aad, &p.nonce, &p.ciphertext).ok()
+            })
+            .await
+            .map_err(|_| AuthError)?
+            .ok_or(AuthError)?;
+        let (verifier, expected_nonce) = login_keys::decode_secrets(&secrets)?;
         let h = a.human.as_ref().ok_or(AuthError)?;
         let response = self
             .http
@@ -95,7 +133,7 @@ impl Identity {
                 ("code", code),
                 ("client_id", h.client_id.as_str()),
                 ("redirect_uri", self.redirect(a).as_str()),
-                ("code_verifier", p.pkce.secret()),
+                ("code_verifier", verifier),
             ])
             .send()
             .await
@@ -103,7 +141,7 @@ impl Identity {
         let response = Self::json_response(response).await?;
         let token = response["id_token"].as_str().ok_or(AuthError)?;
         let (claims, _) = self.verified(a, token, &h.client_id).await?;
-        validate_id_claims(&claims, &h.client_id, &p.nonce, now())?;
+        validate_id_claims(&claims, &h.client_id, expected_nonce, now())?;
         let groups = claims["groups"].as_array().ok_or(AuthError)?;
         let mut roles = Vec::new();
         for group in groups {

@@ -13,6 +13,7 @@ pub mod approvals;
 mod checkpoints;
 pub mod identity;
 pub mod keys;
+pub mod login;
 pub mod private_ca;
 mod rate_limit;
 pub mod signing;
@@ -37,6 +38,8 @@ pub enum Error {
     Audit,
     #[error("object not found")]
     NotFound,
+    #[error("capacity exhausted")]
+    Exhausted,
 }
 impl From<sqlx::Error> for Error {
     fn from(_: sqlx::Error) -> Self {

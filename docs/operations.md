@@ -29,9 +29,45 @@ brig audit verify checkpoint-001/audit.jsonl \
   --checkpoint checkpoint-001/checkpoint.json --public-key audit-key/audit-public.der
 ```
 
-Init emits only a public key and public HSM reference. Checkpoint creation reads a DB-clock head, verifies and exports the complete prefix, signs a domain-separated canonical record, persists it, then writes public signature outputs. New events may arrive afterward; this checkpoint authenticates precisely its recorded prefix. Its payload binds version, organisation, sequence, entry hash, timestamp, key ID and algorithm. The offline verifier requires the exact prefix and independently supplied public key, rejecting suffix truncation, mixed tenants, wrong key and modified checkpoint. `brig audit verify` without checkpoint remains explicitly chain-integrity-only.
+Init emits only a public key and public HSM reference. Checkpoint creation reads a DB-clock head, verifies and exports the complete prefix, signs a domain-separated canonical record, persists it, then publishes the public outputs. New events may arrive afterward; this checkpoint authenticates precisely its recorded prefix. Its payload binds version, organisation, sequence, entry hash, timestamp, key ID and algorithm. The offline verifier requires the exact prefix and independently supplied public key, rejecting suffix truncation, mixed tenants, wrong key and modified checkpoint. `brig audit verify` without checkpoint remains explicitly chain-integrity-only.
 
-Retain the latest checkpoint outside the database and pin the audit public key through an independent trusted channel. A public key delivered alongside an untrusted replacement export does not establish authenticity. Offline verification cannot know a newer checkpoint was withheld unless the verifier already knows its expected sequence/head. Preserve keys/checkpoints through rotation and disaster recovery. Recover persisted checkpoints after output interruption rather than blindly re-signing the same head. OpenSSL can verify `checkpoint.sig` over the SHA-256 digest of `checkpoint.bytes` using `pkeyutl -verify -pubin -keyform DER -pkeyopt digest:sha256` for the initial P-256 audit key.
+### Output bundle
+
+Both `checkpoint` and `recover` stage output in a new private (0700) sibling directory on the same filesystem, create each file exclusively (0400, symlinks refused), fsync it, then write `COMPLETE.json` last. The marker binds format version, organisation, sequence, entry hash and the SHA-256 of `audit.jsonl`, `checkpoint.json`, `checkpoint.bytes` and `checkpoint.sig`. The whole directory is then published with a kernel no-replace rename (Linux `renameat2` `RENAME_NOREPLACE`, macOS `renameatx_np` `RENAME_EXCL`) and the parent is fsynced. An existing output path is never replaced. Other platforms fail before signing; there is no existence-check emulation. An interrupted run leaves no published directory, though a `.brigalow-stage-*` directory may remain after a crash. Treat that as incomplete and delete it. The marker proves completeness only, not who wrote the bundle or whether it is the latest head.
+
+### Freshness
+
+A valid signature does not show a checkpoint is current. Record each published head as `<org>:<seq>:<entry_hash>` (from `checkpoint.json`) in a store outside the Brigalow DB and signing host, then verify against it:
+
+```sh
+brig audit verify checkpoint-001/audit.jsonl --checkpoint checkpoint-001/checkpoint.json \
+  --public-key /independent/audit-public.der --expected-head <org>:<seq>:<entry_hash>
+```
+
+Before replacing the recorded head with a newer one, run the command above against the new bundle with `--expected-head` set to the new head, then confirm the new `audit.jsonl` still contains the previously recorded entry: the line at the old sequence must carry the old `entry_hash`. Only then update the external record. If either check fails, keep the old head and treat the chain as tampered: a DB writer may have replaced history before the new checkpoint was signed.
+
+The verifier rejects an older, newer or substituted checkpoint. Without `--expected-head` it reports "cryptographically valid prefix; freshness unknown". Do not treat that result as current or retained. If the external head is unavailable or was not advanced, do not declare off-host retention or a current audit state.
+
+### Recovering an interrupted checkpoint
+
+If `checkpoint` fails after reporting that persistence succeeded or is unconfirmed, do not re-run it for that head. Recover the persisted record instead:
+
+```sh
+brigalow-audit recover --org <UUID> --seq <SEQ> \
+  --public-key /independent/audit-public.der --output checkpoint-001-recovered
+```
+
+1. Use the sequence from the failure message, or the head you expected. Pin the public key from your independent copy, never from a partial output directory.
+2. `recover` is read-only. It loads no key backend (`backend = "disabled"` is fine, and no HSM module or PIN is needed), never signs and never inserts a record. It verifies the stored signature with the pinned key, rebuilds the exact audit prefix with bounded paged reads, and publishes an identical bundle.
+3. Running it onto an existing complete directory checks it byte-for-byte; any difference fails and nothing is replaced.
+4. A missing record, wrong organisation or key, changed prefix, or malformed or tampered record fails with a generic message. "No persisted checkpoint is visible" means nothing was retained for that sequence. It does not show that the HSM did not sign during the interrupted attempt. Investigate with HSM and audit evidence rather than assuming no signature exists.
+5. If nothing was persisted, a later `checkpoint` run signs the then-current head as a new record. Re-signing an already persisted head is refused (the command reports it and directs you to `recover`).
+
+### Scheduling and retention
+
+Scheduling is operator-owned. A local scheduler may run `checkpoint` and the `recover`/`brig audit verify` check as separate jobs at explicit intervals, with monitoring on local exit status. Brigalow sends no email, contacts no network destination and does not retry failures silently. Copying bundles off the host, making storage immutable, and updating the expected-head record are operator procedures outside Brigalow. A bundle on the signing host is not independent retention.
+
+Retain the latest checkpoint outside the database and pin the audit public key through an independent trusted channel. A public key delivered alongside an untrusted replacement export does not establish authenticity. Preserve keys/checkpoints through rotation and disaster recovery. Record key rotations with independently pinned old and new keys; a `key_id` alone is not a trust anchor. OpenSSL can verify `checkpoint.sig` over the SHA-256 digest of `checkpoint.bytes` using `pkeyutl -verify -pubin -keyform DER -pkeyopt digest:sha256` for the initial P-256 audit key.
 
 ## Backup and recovery
 
@@ -42,9 +78,9 @@ The HSM's keys remain in the HSM. Use only its supported operator backup/HA proc
 Recovery sequence:
 
 1. Stop signing and CA issuance. Retain current externally stored audit checkpoints and CRLs. Restore into an isolated database using the owner role; restore restricted runtime roles/grants and verify TLS configuration.
-2. Verify every audit chain and the latest independently retained signed checkpoint. Compare snapshot age, CA revocations, CRL numbers and consumed release-window caps against external evidence. An older DB snapshot can lose revocations or consumed authority; reconcile before enabling service.
+2. Verify every audit chain and the latest independently retained signed checkpoint with `--expected-head` from the external record; a restored older snapshot fails that check. Compare snapshot age, CA revocations, CRL numbers and consumed release-window caps against external evidence. An older DB snapshot can lose revocations or consumed authority; reconcile before enabling service.
 3. Confirm every required HSM key reference resolves to the expected public key and remains sensitive/non-exportable. Do not silently generate replacements or select software keys.
-4. Confirm pending approvals remain pending. Investigate interrupted `gating`, `signing`, CA issuance and CRL intents using backend/audit evidence. Never automatically repeat a possibly completed signature.
+4. Confirm pending approvals remain pending. Investigate interrupted `gating`, `signing`, CA issuance and CRL intents using backend/audit evidence. Never automatically repeat a possibly completed signature. An org admin or auditor can read a stranded request with `GET /v1/orgs/{org}/requests/{id}/inspection`; it reports state, policy/key and audit events, always marks the outcome unknown and changes nothing. Before submitting any replacement request, stop submission and independently confirm with the HSM vendor's tooling that the old worker and its device operations have stopped. Brigalow cannot mark the request resolved and does not refund consumed window capacity.
 5. Reconcile credentials, policies, windows and configuration, then re-enable only the intended services. Test operator-owned recovery procedures periodically.
 
 `scripts/backup_restore.py` is a harness-only destructive drill. `scripts/e2e.sh --context <local-context>` invokes it against uniquely named disposable Compose resources. It dumps the generated test DB, restores a scratch copy, wipes only that scratch DB, restores again, verifies all audit chains/checkpoints and exact request states, and proves the restored HSM reference can sign a digest independently verified by OpenSSL. The source DB is never dropped. This does not test a vendor HSM backup or a production restore.
@@ -53,7 +89,23 @@ Recovery sequence:
 
 Use the [production reference](../deploy/production/README.md) for the container image, TLS Compose configuration, Helm chart, separate migration command and organisation bootstrap. Production startup requires PKCS#11, configured identity and the exact applied migration set/checksums. The runtime cannot apply migrations or rewrite their history. `brigalow-admin` is a separate owner-only process; its credentials must never reach the server.
 
-Only one server replica is supported. Pending OIDC state is process-local, so restart invalidates unfinished logins; authenticated sessions and signing intents remain in Postgres. Helm rejects additional replicas. A shared database alone does not provide login coordination or qualify vendor HSM failover. There is no exactly-once hardware-signature guarantee across crashes.
+Only one server replica is supported. Pending OIDC logins are now stored in Postgres (see below), so a restart within five minutes no longer invalidates unfinished logins. This does not enable HA: Helm still rejects additional replicas and uses Recreate updates. Multi-process signing, gate, cap and expiry races (AT-HA-02), HSM session concurrency and the recovery/fencing blockers are not implemented or qualified. A shared database does not qualify vendor HSM failover. There is no exactly-once hardware-signature guarantee across crashes.
+
+## Login state key
+
+Human OIDC login requires a dedicated 256-bit key protecting pending-login PKCE verifiers and nonces in Postgres ([ADR 0004](decisions/0004-shared-login-state.md)). The server refuses to start with a human authority and no key ring. Keep this key separate from HSM PINs, signing keys and DB credentials. Never put it in TOML, Helm values, logs or fixtures.
+
+Provision it as a private file containing base64 of 32 random bytes, for example `(umask 077 && openssl rand -base64 32 > login_key)`, which creates the file as 0600 from the start, run inside your secret-management process. Reference it by path:
+
+```toml
+[login_keys]
+active = { id = "2026-11", file = "/run/brigalow/login_key" }
+previous = [{ id = "2026-08", file = "/run/brigalow/login_key_previous" }]
+```
+
+IDs are 1–32 characters of `[A-Za-z0-9_-]`, unique, with distinct key material and at most four previous entries. Files must be regular, non-symlink, mode 0600 and at most 4096 bytes. In Helm, add the file to the runtime Secret; the init container copies it to a private 0600 file.
+
+Rotation: generate a new key with a new ID, make it `active` and move the old one to `previous`, then do a controlled restart. Keep the old entry for at least the five-minute pending lifetime plus restart margin, then remove it. Logins sealed with a removed or unknown key ID are rejected, and the user signs in again. After a suspected key compromise, remove the key immediately: pending logins sealed with it are invalidated, and existing sessions follow their normal expiry and revocation. Each key ID allows 2^31 committed logins; past that, logins fail closed until you rotate. Reusing an ID with new material is not a rotation, because the usage counter is per ID. Back up the key through your secret manager. A database backup alone cannot open pending rows, which expire within five minutes anyway.
 
 `/livez` checks process liveness; `/healthz` also checks Postgres and the logged-in HSM session in production. An unavailable/busy HSM makes readiness fail without signing. Vendor transport timeouts remain operator-owned because native calls cannot be forcibly cancelled safely.
 
@@ -69,4 +121,39 @@ The manual `lab-signed release bundle` workflow builds Linux binaries/provider w
 
 The generated key is ephemeral and the manifest explicitly says `lab`. Its included public key enables integrity checks but does not independently authenticate the publisher; consumers must establish key/source trust themselves. This workflow makes no release-key custody, public-trust or certification claim. A production release process must use your reviewed HSM/policy/trust configuration under separate operational authorisation.
 
-`python3 scripts/test_release.py` tests archive/SBOM packaging and payload tamper rejection with generated fixture binaries. The full Compose tool test separately verifies signing through the real local control plane and rejects a modified manifest. `scripts/verify_release.py <directory> --public-key <independently-trusted-PEM>` verifies signature and all listed payload digests.
+`python3 scripts/test_release.py` tests archive/SBOM packaging and payload tamper rejection with generated fixture binaries. The full Compose tool test separately verifies signing through the real local control plane and rejects a modified manifest. `scripts/verify_release.py <directory> --mode lab --public-key <independently-trusted-PEM>` verifies signature and all listed payload digests. The mode is required; a lab bundle never passes operator mode.
+
+## Operator-signed release bundles
+
+`scripts/operator_release.py` is a local operator command, separate from the lab workflow. It creates no GitHub release, publishes nothing to a network, contacts only the configured Brigalow server and never retries. This repository has not signed or published any operator release, and running the command does not qualify a production HSM.
+
+Before use, the operator separately provisions:
+
+- a P-256 or RSA-3072 `release` key generated in their PKCS#11 device, with a certificate chain to a configured private or external-CA anchor and (for `offline` keys) a release window;
+- a `release`-purpose policy with the approvals, gates and claims they require, and a workload OIDC token in `BRIGALOW_TOKEN` from a CI job matching that policy's workload rule. Release policies require verified repository, ref, environment and `ref_protected` claims, which API credentials do not carry;
+- the release public key, exported from Brigalow and distributed to consumers through an independently trusted channel. Record its SPKI SHA-256 fingerprint for `--expected-key-sha256`.
+
+```sh
+python3 scripts/operator_release.py --binaries target/release --output dist/brigalow-<commit> \
+  --public-key <pinned-release-public.pem> --expected-key-sha256 <reviewed-fingerprint> \
+  --expected-revision <full-commit> --server https://<brigalow> --org <UUID> --project <UUID> \
+  --policy <release-policy> --ca-file <server-ca.pem>
+```
+
+The command requires a clean git checkout. It packages the archive and SBOM into a private staging directory beside `--output` and writes a frozen version 2 manifest: `trust: "operator"`, `provenance: "self-hosted"`, the full source commit, `digest_algorithm: "sha256"` and exactly two artifacts (`brigalow-linux.tar.gz`, `sbom.cdx.json`) with SHA-256 hashes. The manifest is canonical JSON; those exact bytes are hashed locally by one `brig sign --format raw` call and the server receives only the digest. The command prints the request ID, waits for approvals, gates and windows as normal, verifies the signature and every payload against the pinned key, then publishes the complete directory with an atomic no-replace rename (`renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np(RENAME_EXCL)` on macOS). Other platforms fail closed.
+
+Failure handling:
+
+- Existing output is refused before any request is submitted and is never modified. A target created during signing makes publication fail and stays untouched.
+- Denial, rejection, gate failure, expiry, a signing failure or `--timeout` exits non-zero, removes staging and prints the request ID. A timeout means the outcome is uncertain: query that request ID on the server. Do not rerun the command to "retry"; a new run creates a new request and may consume more release-window capacity.
+- Timestamp and attestation outputs are not yet part of the version 2 bundle. A policy that returns them makes the command fail rather than drop evidence silently. Use `timestamp = "disabled"` until a later manifest version binds timestamp tokens.
+- If the final directory sync fails after the rename, the command exits non-zero and says the bundle needs verification before use.
+
+Consumers verify with the separately pinned key, never a key shipped beside the bundle:
+
+```sh
+python3 scripts/verify_release.py <bundle> --mode operator --public-key <pinned.pem> \
+  --expected-key-sha256 <fingerprint> --expected-revision <full-commit>
+```
+
+Operator mode rejects keys inside the bundle, symlinked or non-regular entries, missing or extra files, duplicate JSON keys, non-canonical encoding, unknown fields, versions, trust labels, provenance or algorithms, non-basename names and manifests over 64 KiB. OpenSSL (`dgst -sha256 -verify`) checks the signature over the exact manifest bytes before the manifest is parsed. A pass reports cryptographic validity and the declared `operator` origin only. It is not a public-trust, CA or platform-trust decision, and it cannot show that a newer release was withheld. Key rotation, revocation and the trusted distribution channel for the pinned key remain operator responsibilities.

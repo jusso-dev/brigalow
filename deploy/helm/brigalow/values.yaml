@@ -1,7 +1,8 @@
 # Single-instance production reference; operator qualification still required. Supply an immutable image digest built and reviewed by your operator.
 image: ""
 replicas: 1
-# Existing Secret containing config.toml, identity.json and referenced credentials.
+# Existing Secret containing config.toml, identity.json and referenced credentials (including the login_keys file).
+# replicas must stay 1: shared login state does not qualify multi-instance signing.
 existingSecret: ""
 # HSM vendor library/configuration must be supplied in the reviewed image.
 resources:

@@ -1,10 +1,13 @@
 pub mod approvals;
+pub mod audit_checkpoint;
 pub mod auth;
 pub mod config;
 pub mod gates;
 pub mod keys;
 pub mod notifications;
+pub mod publish;
 pub mod rate_limit;
+pub mod recovery;
 pub mod signing;
 pub mod web;
 use axum::{
@@ -89,6 +92,9 @@ pub fn application(state: AppState) -> Router {
                 approvals::Route::CloseWindow => post(approvals::close_window),
             },
         );
+    }
+    for (_, path) in recovery::ROUTES {
+        router = router.route(path, get(recovery::inspect));
     }
     router
         .route("/static/htmx.js", get(approvals::htmx))

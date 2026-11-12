@@ -1,3 +1,5 @@
+pub mod gitlab;
+pub mod login_keys;
 pub mod oidc;
 pub mod workload;
 use crate::config::Mode;
@@ -28,7 +30,23 @@ pub struct HumanConfig {
 pub struct WorkloadRule {
     pub project: Uuid,
     pub policy: Uuid,
+    /// Exact raw JSON-string claims. Required for GitHub; must be empty for GitLab, whose
+    /// typed rule matches signed claims before normalisation (raw `ref` is a short name).
+    #[serde(default)]
     pub claims: BTreeMap<String, String>,
+    /// Required on, and only allowed on, a `provider = "gitlab"` authority.
+    #[serde(default)]
+    pub gitlab: Option<gitlab::GitlabRule>,
+}
+/// Operator-selected workload token profile. Never inferred from token contents or host.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
+    /// Existing behaviour: exact raw claim rules and the fixed GitHub-shaped claim set.
+    #[default]
+    Github,
+    /// GitLab CI ID tokens (18.4+ claim set), test-purpose policies only.
+    Gitlab,
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +55,8 @@ pub struct Authority {
     pub name: String,
     pub issuer: String,
     pub jwks_url: String,
+    #[serde(default)]
+    pub provider: Provider,
     pub human: Option<HumanConfig>,
     #[serde(default)]
     pub workloads: Vec<WorkloadRule>,
@@ -55,11 +75,20 @@ struct CachedKeys {
     expires: Instant,
     value: serde_json::Value,
 }
+/// Pending-login bounds. Rows live in Postgres and are shared by every instance using the
+/// same database; there is no process-local pending state or in-memory fallback.
+pub const PENDING_LIMITS: brigalow_store::login::LoginLimits = brigalow_store::login::LoginLimits {
+    per_org: 1024,
+    global: 4096,
+    lifetime_ms: 300_000,
+    max_seals: login_keys::MAX_SEALS_PER_KEY,
+};
 pub struct Identity {
     pub config: IdentityConfig,
     http: reqwest::Client,
     keys: Mutex<HashMap<(Uuid, String), CachedKeys>>,
-    pending: Mutex<HashMap<String, oidc::Pending>>,
+    login_keys: Option<Arc<login_keys::LoginKeys>>,
+    pending_limits: brigalow_store::login::LoginLimits,
 }
 pub fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
@@ -76,7 +105,20 @@ pub fn now() -> i64 {
         .as_secs() as i64
 }
 impl Identity {
-    pub fn new(config: IdentityConfig, _mode: Mode) -> Result<Arc<Self>, AuthError> {
+    /// Human login requires an operator-provisioned key ring; without one it fails closed.
+    pub fn new(
+        config: IdentityConfig,
+        mode: Mode,
+        login_keys: Option<Arc<login_keys::LoginKeys>>,
+    ) -> Result<Arc<Self>, AuthError> {
+        Self::with_pending_limits(config, mode, login_keys, PENDING_LIMITS)
+    }
+    pub fn with_pending_limits(
+        config: IdentityConfig,
+        _mode: Mode,
+        login_keys: Option<Arc<login_keys::LoginKeys>>,
+        pending_limits: brigalow_store::login::LoginLimits,
+    ) -> Result<Arc<Self>, AuthError> {
         fn valid(url: &str) -> bool {
             url::Url::parse(url).is_ok_and(|u| {
                 u.scheme() == "https"
@@ -95,11 +137,17 @@ impl Identity {
         {
             return Err(AuthError);
         }
+        // Human login needs the shared pending-state key ring; refuse rather than degrade.
+        if login_keys.is_none() && config.authorities.iter().any(|a| a.human.is_some()) {
+            return Err(AuthError);
+        }
         let mut names = std::collections::HashSet::new();
         for a in &config.authorities {
             if !valid(&a.issuer)
                 || !valid(&a.jwks_url)
                 || a.name.is_empty()
+                // Matches the pending_logins.provider column limit.
+                || a.name.len() > 128
                 || !a
                     .name
                     .bytes()
@@ -114,9 +162,30 @@ impl Identity {
                 }
             }
             for r in &a.workloads {
-                if r.claims.is_empty() {
+                let valid = match (a.provider, &r.gitlab) {
+                    (Provider::Github, None) => !r.claims.is_empty(),
+                    (Provider::Gitlab, Some(g)) => r.claims.is_empty() && g.valid(),
+                    _ => false,
+                };
+                if !valid {
                     return Err(AuthError);
                 }
+            }
+        }
+        // Workload verification selects the first authority by (org, issuer); one issuer must
+        // not be configured under two profiles, or the chosen profile would depend on order.
+        for a in config
+            .authorities
+            .iter()
+            .filter(|a| !a.workloads.is_empty())
+        {
+            if config.authorities.iter().any(|b| {
+                !b.workloads.is_empty()
+                    && b.org_id == a.org_id
+                    && b.issuer == a.issuer
+                    && b.provider != a.provider
+            }) {
+                return Err(AuthError);
             }
         }
         let mut builder = reqwest::Client::builder()
@@ -134,9 +203,14 @@ impl Identity {
             config,
             http: builder.build().map_err(|_| AuthError)?,
             keys: Mutex::new(HashMap::new()),
-            pending: Mutex::new(HashMap::new()),
+            login_keys,
+            pending_limits,
         }))
     }
+    pub fn login_keys(&self) -> Option<Arc<login_keys::LoginKeys>> {
+        self.login_keys.clone()
+    }
+
     pub fn authority(&self, org: Uuid, name: &str) -> Result<&Authority, AuthError> {
         self.config
             .authorities
@@ -303,5 +377,30 @@ impl Identity {
             })
             .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn config(name: String) -> IdentityConfig {
+        IdentityConfig {
+            public_url: "https://brigalow.test".into(),
+            ca_file: None,
+            authorities: vec![Authority {
+                org_id: Uuid::nil(),
+                name,
+                issuer: "https://idp.test".into(),
+                jwks_url: "https://idp.test/jwks".into(),
+                provider: Provider::Github,
+                human: None,
+                workloads: vec![],
+            }],
+        }
+    }
+    #[test]
+    fn authority_names_fit_the_pending_login_column() {
+        assert!(Identity::new(config("a".repeat(128)), Mode::Lab, None).is_ok());
+        assert!(Identity::new(config("a".repeat(129)), Mode::Lab, None).is_err());
     }
 }

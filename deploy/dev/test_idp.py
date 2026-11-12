@@ -7,6 +7,8 @@ from cryptography.hazmat.primitives import hashes
 key = rsa.generate_private_key(public_exponent=65537,key_size=3072)
 bad_key = rsa.generate_private_key(public_exponent=65537,key_size=3072)
 codes = {}
+# Token-endpoint attempts per authorization code; lets AT-HA-01 prove at most one exchange.
+exchanges = {}
 lock = threading.Lock()
 def b64(value): return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
 def integer(value): return b64(value.to_bytes((value.bit_length()+7)//8,"big"))
@@ -42,6 +44,10 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 codes[code]={**q,"expires":time.time()+60}
             return self.reply(302,{}, {"Location":q["redirect_uri"]+"?"+urlencode({"state":q["state"],"code":code})})
+        if url.path=="/exchanges":
+            code=parse_qs(url.query).get("code",[""])[0]
+            with lock: count=exchanges.get(code,0)
+            return self.reply(200,{"count":count})
         return self.reply(404,{})
     def do_POST(self):
         size=int(self.headers.get("Content-Length",0))
@@ -52,7 +58,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200,{"token":token(claims,request.get("bad",False),request.get("alg","RS256"))})
         if self.path=="/token":
             q={k:v[0] for k,v in parse_qs(data.decode()).items()}
-            with lock: pending=codes.pop(q.get("code"),None)
+            with lock:
+                if q.get("code") and len(exchanges)<100000:exchanges[q["code"]]=exchanges.get(q["code"],0)+1
+                pending=codes.pop(q.get("code"),None)
             if not pending or pending["expires"]<=time.time():return self.reply(400,{})
             challenge=b64(hashlib.sha256(q.get("code_verifier","").encode()).digest())
             if q.get("grant_type")!="authorization_code" or challenge!=pending["code_challenge"] or q.get("client_id")!=pending["client_id"] or q.get("redirect_uri")!=pending["redirect_uri"]:return self.reply(400,{})

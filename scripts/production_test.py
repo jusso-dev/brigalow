@@ -1,4 +1,5 @@
 """AT-OPS-04/05: disposable production-mode image/bootstrap/TLS checks. No deployment."""
+import base64
 import concurrent.futures
 import json
 import os
@@ -48,6 +49,9 @@ def qualify(compose, env, root, directory):
     app.mkdir(parents=True, mode=0o700); tls.mkdir(mode=0o700)
     protected = [secrets.token_hex(24), secrets.token_hex(24), secrets.token_hex(24)]
     (app/"hsm_pin").write_text(protected[0]); (app/"hsm_so_pin").write_text(protected[1])
+    # Shared pending-login AEAD key: generated per run, never a fixture.
+    login_key = base64.b64encode(secrets.token_bytes(32)).decode()
+    (app/"login_key").write_text(login_key + "\n")
     (app/"db_password").write_bytes((Path(directory)/"app_password").read_bytes())
     (app/"ca.crt").write_bytes((Path(directory)/"ca.crt").read_bytes())
     (tls/"tls.crt").write_bytes((Path(directory)/"server.crt").read_bytes())
@@ -62,6 +66,9 @@ db_ca_file = "/run/brigalow/ca.crt"
 hsm_module = "/usr/lib/softhsm/libsofthsm2.so"
 hsm_token = "production-test"
 hsm_pin_file = "/run/brigalow/hsm_pin"
+
+[login_keys]
+active = { id = "production-test", file = "/run/brigalow/login_key" }
 ''')
     (app/"identity.json").write_text(json.dumps(dict(public_url="https://brigalow.test", ca_file="/run/brigalow/ca.crt", authorities=[dict(org_id=str(uuid.uuid4()),name="test",issuer="https://idp:8443",jwks_url="https://idp:8443/jwks",human=dict(client_id="valid",authorization_url="https://idp:8443/authorize",token_url="https://idp:8443/token",group_roles={"admins":"org_admin"}))])))
     for path in [*app.iterdir(), *tls.iterdir()]: path.chmod(0o600)
@@ -131,7 +138,7 @@ hsm_pin_file = "/run/brigalow/hsm_pin"
             info=json.loads(call("inspect",container,capture_output=True,text=True).stdout)[0]
             assert info["HostConfig"]["ReadonlyRootfs"] and info["HostConfig"]["CapDrop"]==["ALL"]
             logs=call("logs",container,capture_output=True).stdout+call("logs",container,capture_output=True).stderr
-            for secret in protected+[str((app/"db_password").read_text())]:
+            for secret in protected+[str((app/"db_password").read_text()), login_key]:
                 assert secret.encode() not in logs, "production fixture credential disclosure"
         print("AT-OPS-05: non-root/read-only production-mode HSM container, TLS, body/rate limits and credential redaction passed")
     except Exception:
@@ -139,7 +146,7 @@ hsm_pin_file = "/run/brigalow/hsm_pin"
         for name in [proxy, server]:
             result = subprocess.run(docker+["logs", name], capture_output=True, text=True)
             diagnostic = result.stdout + result.stderr
-            for value in protected + [(app/"db_password").read_text()]:
+            for value in protected + [(app/"db_password").read_text(), login_key]:
                 diagnostic = diagnostic.replace(value, "[REDACTED]")
             print(diagnostic[-2000:])
         raise

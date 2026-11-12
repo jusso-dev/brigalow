@@ -7,7 +7,10 @@ use axum::{
 use brigalow_core::rbac::{Role, Scope};
 use brigalow_server::{
     application,
-    auth::{self, Authority, HumanConfig, Identity, IdentityConfig, WorkloadRule},
+    auth::{
+        self, gitlab::GitlabRule, login_keys::LoginKeys, Authority, HumanConfig, Identity,
+        IdentityConfig, Provider, WorkloadRule,
+    },
     config::Mode,
     web::{OBJECT_ROUTES, TENANT_MUTATIONS},
     AppState,
@@ -22,7 +25,17 @@ use sqlx::{
 use std::{collections::BTreeMap, sync::Arc};
 use tower::ServiceExt;
 use uuid::Uuid;
+/// Tests share one database. AT-HA-01 measures global pending-login inventory, so it holds
+/// the write side; every other fixture holds a read guard for its lifetime.
+static DATABASE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+#[allow(dead_code)]
+enum DatabaseGuard {
+    Shared(tokio::sync::RwLockReadGuard<'static, ()>),
+    Exclusive(tokio::sync::RwLockWriteGuard<'static, ()>),
+}
 struct Fixture {
+    _database: DatabaseGuard,
+    login_material: [u8; 32],
     keys: brigalow_server::keys::KeyService,
     tsa: brigalow_crypto::timestamp::Client,
     router: Router,
@@ -34,8 +47,8 @@ struct Fixture {
     orgs: [Uuid; 2],
     objects: [[Uuid; 4]; 2],
 }
-async fn fixture() -> Fixture {
-    let base = PgConnectOptions::new()
+fn database_options() -> PgConnectOptions {
+    PgConnectOptions::new()
         .host(
             std::env::var("BRIGALOW_TEST_DB_HOST")
                 .as_deref()
@@ -50,21 +63,34 @@ async fn fixture() -> Fixture {
         .database("brigalow")
         .ssl_mode(PgSslMode::VerifyFull)
         .ssl_root_cert(std::env::var("BRIGALOW_TEST_DB_CA_FILE").unwrap())
-        .disable_statement_logging();
-    let read = |name: &str| std::fs::read_to_string(std::env::var(name).unwrap()).unwrap();
+        .disable_statement_logging()
+}
+fn read_test_secret(name: &str) -> String {
+    std::fs::read_to_string(std::env::var(name).unwrap()).unwrap()
+}
+fn runtime_options() -> PgConnectOptions {
+    database_options()
+        .username("brigalow_runtime")
+        .password(&read_test_secret("BRIGALOW_TEST_APP_PASSWORD_FILE"))
+}
+fn login_material() -> [u8; 32] {
+    use rand::RngCore;
+    let mut key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+    key
+}
+async fn fixture() -> Fixture {
+    fixture_with(DatabaseGuard::Shared(DATABASE.read().await)).await
+}
+async fn fixture_with(database: DatabaseGuard) -> Fixture {
     let admin = PgPool::connect_with(
-        base.clone()
+        database_options()
             .username("postgres")
-            .password(&read("BRIGALOW_TEST_ADMIN_PASSWORD_FILE")),
+            .password(&read_test_secret("BRIGALOW_TEST_ADMIN_PASSWORD_FILE")),
     )
     .await
     .unwrap();
-    let store = Store::connect(
-        base.username("brigalow_runtime")
-            .password(&read("BRIGALOW_TEST_APP_PASSWORD_FILE")),
-    )
-    .await
-    .unwrap();
+    let store = Store::connect(runtime_options()).await.unwrap();
     let orgs = [Uuid::new_v4(), Uuid::new_v4()];
     let mut objects = [[Uuid::nil(); 4]; 2];
     for (i, org) in orgs.iter().enumerate() {
@@ -138,6 +164,7 @@ async fn fixture() -> Fixture {
                 } else {
                     format!("{issuer}/jwks")
                 },
+                provider: Provider::Github,
                 human: Some(HumanConfig {
                     client_id: client.into(),
                     authorization_url: format!("{issuer}/authorize"),
@@ -154,6 +181,7 @@ async fn fixture() -> Fixture {
                             ("environment".into(), "release".into()),
                             ("workflow".into(), "build".into()),
                         ]),
+                        gitlab: None,
                     }]
                 } else {
                     vec![]
@@ -161,6 +189,8 @@ async fn fixture() -> Fixture {
             });
         }
     }
+    // Generated per run; never a fixture file.
+    let login_material = login_material();
     let identity = Identity::new(
         IdentityConfig {
             public_url: "https://brigalow.test".into(),
@@ -168,6 +198,9 @@ async fn fixture() -> Fixture {
             authorities,
         },
         Mode::Lab,
+        Some(Arc::new(
+            LoginKeys::new(("k1", &login_material), &[]).unwrap(),
+        )),
     )
     .unwrap();
     let http = reqwest::Client::builder()
@@ -209,6 +242,8 @@ async fn fixture() -> Fixture {
         identity: Some(identity.clone()),
     });
     Fixture {
+        _database: database,
+        login_material,
         keys,
         tsa,
         router,
@@ -230,6 +265,17 @@ async fn request(
     csrf: Option<&str>,
     body: Value,
 ) -> (StatusCode, HeaderMap, String) {
+    request_at(&f.router, method, path, cookie, bearer, csrf, body).await
+}
+async fn request_at(
+    router: &Router,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    bearer: Option<&str>,
+    csrf: Option<&str>,
+    body: Value,
+) -> (StatusCode, HeaderMap, String) {
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
@@ -244,8 +290,7 @@ async fn request(
     if let Some(c) = csrf {
         builder = builder.header("x-csrf-token", c);
     }
-    let response = f
-        .router
+    let response = router
         .clone()
         .oneshot(builder.body(Body::from(body.to_string())).unwrap())
         .await
@@ -256,8 +301,20 @@ async fn request(
     (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
 }
 async fn begin(f: &Fixture, org: Uuid, provider: &str) -> (String, String, String) {
-    let (status, h, _) = request(
-        f,
+    let b = begin_at(f, &f.router, org, provider).await;
+    (b.cookie, b.state, b.code)
+}
+/// Browser view of a started login, including values visible in the authorize URL.
+struct Begun {
+    cookie: String,
+    state: String,
+    code: String,
+    nonce: String,
+    challenge: String,
+}
+async fn begin_at(f: &Fixture, router: &Router, org: Uuid, provider: &str) -> Begun {
+    let (status, h, _) = request_at(
+        router,
         "GET",
         &format!("/auth/{org}/{provider}/login"),
         None,
@@ -274,6 +331,8 @@ async fn begin(f: &Fixture, org: Uuid, provider: &str) -> (String, String, Strin
         .next()
         .unwrap()
         .to_owned();
+    let authorize = url::Url::parse(h["location"].to_str().unwrap()).unwrap();
+    let authorize: BTreeMap<_, _> = authorize.query_pairs().into_owned().collect();
     let response = f
         .http
         .get(h["location"].to_str().unwrap())
@@ -283,10 +342,26 @@ async fn begin(f: &Fixture, org: Uuid, provider: &str) -> (String, String, Strin
     assert_eq!(response.status(), 302);
     let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
     let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-    (cookie, params["state"].clone(), params["code"].clone())
+    Begun {
+        cookie,
+        state: params["state"].clone(),
+        code: params["code"].clone(),
+        nonce: authorize["nonce"].clone(),
+        challenge: authorize["code_challenge"].clone(),
+    }
 }
 async fn complete(
     f: &Fixture,
+    org: Uuid,
+    provider: &str,
+    cookie: &str,
+    state: &str,
+    code: &str,
+) -> (StatusCode, HeaderMap) {
+    complete_at(&f.router, org, provider, cookie, state, code).await
+}
+async fn complete_at(
+    router: &Router,
     org: Uuid,
     provider: &str,
     cookie: &str,
@@ -297,8 +372,7 @@ async fn complete(
         .append_pair("state", state)
         .append_pair("code", code)
         .finish();
-    let response = f
-        .router
+    let response = router
         .clone()
         .oneshot(
             Request::builder()
@@ -399,7 +473,7 @@ async fn at_id_01_pkce_nonce_groups_and_one_use_browser_bound_login() {
             401
         );
     }
-    let attempt = f.identity.login(org, "valid").await.unwrap();
+    let attempt = f.identity.login(&f.store, org, "valid").await.unwrap();
     let response = f.http.get(attempt.url).send().await.unwrap();
     let url = url::Url::parse(response.headers()["location"].to_str().unwrap()).unwrap();
     let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
@@ -1756,9 +1830,16 @@ async fn at_pol_01_03_and_sign_01_03_cli_https_and_tsa_fail_closed() {
 }
 
 async fn role_session(f: &Fixture, actor: &str, roles: Vec<Role>) -> (String, String) {
+    role_session_in(f, f.orgs[0], actor, roles).await
+}
+async fn role_session_in(
+    f: &Fixture,
+    org: Uuid,
+    actor: &str,
+    roles: Vec<Role>,
+) -> (String, String) {
     let secret = auth::random_secret();
     let csrf = auth::random_secret();
-    let org = f.orgs[0];
     let p = brigalow_core::rbac::Principal {
         org_id: org,
         actor: actor.into(),
@@ -2730,7 +2811,7 @@ async fn at_int_01_native_tools_through_remote_pkcs11() {
             workload.policy = policy.id;
         }
     }
-    f.identity = Identity::new(config, Mode::Lab).unwrap();
+    f.identity = Identity::new(config, Mode::Lab, f.identity.login_keys()).unwrap();
     f.router = application(AppState {
         rate_limit: Default::default(),
         store: f.store.clone(),
@@ -3011,3 +3092,1442 @@ async fn at_ops_02_per_credential_rate_limits_and_audit() {
 #[cfg(feature = "tool-tests")]
 #[path = "support/csc.rs"]
 mod csc;
+
+/// AT-ID-04: explicit GitLab profile, generated-key HTTPS issuer, test-purpose signing only.
+#[tokio::test]
+async fn at_id_04_gitlab_profile_is_exact_and_test_purpose_only() {
+    use brigalow_core::{
+        keys::KeyRecord,
+        policy::{Policy, RequestState, SignRequest},
+    };
+    let mut f = fixture().await;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    f.keys.backend = Arc::new(CountSigning {
+        backend: f.keys.backend.clone(),
+        calls: calls.clone(),
+    });
+    // Fresh organisations: no GitHub authority shares their issuer, and the fixture's GitHub
+    // authorities for f.orgs stay byte-for-byte as before.
+    let orgs = [Uuid::new_v4(), Uuid::new_v4()];
+    let rule = GitlabRule {
+        project_id: "4242".into(),
+        project_path: "platform/app".into(),
+        ref_path: "refs/heads/main".into(),
+        pipeline_sources: vec!["push".into()],
+        environment: Some("signing-test".into()),
+    };
+    let mut projects = Vec::new();
+    let mut keys = Vec::new();
+    let mut policies: Vec<[Uuid; 3]> = Vec::new();
+    for org in orgs {
+        sqlx::query("INSERT INTO brigalow.organisations VALUES ($1,'gitlab-test')")
+            .bind(org)
+            .execute(&f.admin)
+            .await
+            .unwrap();
+        projects.push(
+            f.store
+                .tenant(org)
+                .create_project("gitlab", "project")
+                .await
+                .unwrap(),
+        );
+    }
+    // Rebuild the router so the counting backend is the one used for signing.
+    f.router = application(AppState {
+        rate_limit: Default::default(),
+        gates: Default::default(),
+        notifications: Default::default(),
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    for (i, org) in orgs.iter().copied().enumerate() {
+        let project = projects[i];
+        let custodian =
+            role_session_in(&f, org, "gitlab-custodian", vec![Role::KeyCustodian]).await;
+        let admin = role_session_in(&f, org, "gitlab-admin", vec![Role::OrgAdmin]).await;
+        let result = json_as(
+            &f,
+            &format!("/v1/orgs/{org}/projects/{project}/keys"),
+            &custodian,
+            json!({"algorithm":"p256","purpose":"test","offline":false}),
+        )
+        .await;
+        assert_eq!(result.0, 201);
+        let key: KeyRecord = serde_json::from_str(&result.2).unwrap();
+        assert_eq!(
+            json_as(
+                &f,
+                &format!("/v1/orgs/{org}/keys/{}/activate", key.key.id),
+                &custodian,
+                json!({})
+            )
+            .await
+            .0,
+            200
+        );
+        let path = format!("/v1/orgs/{org}/projects/{project}/policies");
+        let mut ids = [Uuid::nil(); 3];
+        for (j, (name, attestation)) in [("gitlab-test", false), ("gitlab-attest", true)]
+            .into_iter()
+            .enumerate()
+        {
+            let result = json_as(&f, &path, &admin, json!({"name":name,"key":key.key.id,"purpose":"test","claims":{},"algorithms":["p256"],"timestamp":"disabled","attestation":attestation})).await;
+            assert_eq!(result.0, 201, "{}", result.2);
+            ids[j] = serde_json::from_str::<Policy>(&result.2).unwrap().id;
+        }
+        // Lab mode cannot bind a release key, so plant a release policy directly: GitLab
+        // principals must be refused before key binding is even considered.
+        let release = Policy {
+            id: Uuid::new_v4(),
+            name: "gitlab-release".into(),
+            project,
+            key: key.key.id,
+            purpose: brigalow_core::Purpose::Release,
+            claims: BTreeMap::from([
+                ("repository".into(), "platform/app".into()),
+                ("ref".into(), "refs/heads/main".into()),
+                ("environment".into(), "signing-test".into()),
+                ("ref_protected".into(), "true".into()),
+            ]),
+            algorithms: vec![brigalow_core::keys::Algorithm::P256],
+            timestamp: brigalow_core::policy::Timestamp::Disabled,
+            approval: None,
+            gates: vec![],
+            attestation: false,
+        };
+        sqlx::query("INSERT INTO brigalow.policies (org_id,id,project_id,key_id,name,record) VALUES ($1,$2,$3,$4,$5,$6)")
+            .bind(org)
+            .bind(release.id)
+            .bind(project)
+            .bind(key.key.id)
+            .bind(&release.name)
+            .bind(sqlx::types::Json(&release))
+            .execute(&f.admin)
+            .await
+            .unwrap();
+        ids[2] = release.id;
+        policies.push(ids);
+        keys.push(key);
+    }
+    let mut config = f.identity.config.clone();
+    for (i, org) in orgs.iter().enumerate() {
+        config.authorities.push(Authority {
+            org_id: *org,
+            name: "gitlab".into(),
+            issuer: f.issuer.clone(),
+            jwks_url: format!("{}/jwks", f.issuer),
+            provider: Provider::Gitlab,
+            human: None,
+            workloads: policies[i]
+                .iter()
+                .map(|policy| WorkloadRule {
+                    project: projects[i],
+                    policy: *policy,
+                    claims: BTreeMap::new(),
+                    gitlab: Some(rule.clone()),
+                })
+                .collect(),
+        });
+    }
+    // One issuer under two profiles in one organisation is ambiguous and refused.
+    let mut mixed = config.clone();
+    let mut github = mixed.authorities.last().unwrap().clone();
+    github.name = "github-same-issuer".into();
+    github.provider = Provider::Github;
+    github.workloads = vec![WorkloadRule {
+        project: projects[1],
+        policy: policies[1][0],
+        claims: BTreeMap::from([("repository".into(), "platform/app".into())]),
+        gitlab: None,
+    }];
+    mixed.authorities.push(github);
+    assert!(Identity::new(mixed, Mode::Lab, f.identity.login_keys()).is_err());
+    f.identity = Identity::new(config, Mode::Lab, f.identity.login_keys()).unwrap();
+    f.router = application(AppState {
+        rate_limit: Default::default(),
+        gates: Default::default(),
+        notifications: Default::default(),
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    let org = orgs[0];
+    let project = projects[0];
+    let [test_policy, attest_policy, release_policy] = policies[0];
+    let submit = format!("/v1/orgs/{org}/projects/{project}/sign-requests");
+    let digest = vec![9u8; 32];
+    let input = |policy: Uuid| json!({"request_id":Uuid::new_v4(),"policy":policy,"digest_alg":"sha256","digest":digest,"artifact_name":"gitlab.bin","format":"raw","metadata":{"repository":"attacker/repo","ref_path":"refs/heads/main","pipeline_source":"push"}});
+    let claims = json!({
+        "aud": format!("brigalow:{org}"),
+        "sub": "project_path:platform/app:ref_type:branch:ref:main",
+        "namespace_id": "17",
+        "namespace_path": "platform",
+        "project_id": "4242",
+        "project_path": "platform/app",
+        "job_project_id": "4242",
+        "job_project_path": "platform/app",
+        "user_id": "5",
+        "user_login": "builder",
+        "pipeline_id": "1001",
+        "pipeline_source": "push",
+        "job_id": "2002",
+        "ref": "main",
+        "ref_type": "branch",
+        "ref_path": "refs/heads/main",
+        "ref_protected": "true",
+        "environment": "signing-test",
+        "environment_protected": "true",
+        "sha": "714a629c0b401fdce83e847fc9589983fc6f46bc",
+        "ci_config_ref_uri": "gitlab.test/platform/app//.gitlab-ci.yml@refs/heads/main",
+        "ci_config_sha": "714a629c0b401fdce83e847fc9589983fc6f46bc",
+        "runner_id": 1,
+        "runner_environment": "self-hosted"
+    });
+    let scope = Scope {
+        project,
+        policy: test_policy,
+    };
+    let valid = mint(&f, claims.clone(), false, "RS256").await;
+    let principal = f.identity.workload(org, &valid, &scope).await.unwrap();
+    assert_eq!(principal.claims["provider"], "gitlab");
+    assert_eq!(principal.claims["ref"], "refs/heads/main");
+    assert_eq!(principal.claims["sha"], claims["sha"]);
+    for absent in [
+        "repository",
+        "workflow",
+        "ref_protected",
+        "ci_config_ref_uri",
+    ] {
+        assert!(!principal.claims.contains_key(absent), "{absent} mapped");
+    }
+    // Test-purpose signing succeeds; metadata never becomes a verified claim.
+    let body = input(test_policy);
+    let result = request(&f, "POST", &submit, None, Some(&valid), None, body.clone()).await;
+    assert_eq!(result.0, 201, "{}", result.2);
+    let signed: SignRequest = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(signed.state, RequestState::Signed);
+    assert_eq!(signed.verified_claims, principal.claims);
+    assert!(signed.attestation.is_none());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("public.der"), &keys[0].public_key).unwrap();
+    std::fs::write(dir.path().join("digest"), &digest).unwrap();
+    std::fs::write(dir.path().join("signature"), signed.output.unwrap()).unwrap();
+    openssl_in(
+        dir.path(),
+        &[
+            "pkeyutl",
+            "-verify",
+            "-pubin",
+            "-inkey",
+            "public.der",
+            "-keyform",
+            "DER",
+            "-sigfile",
+            "signature",
+            "-in",
+            "digest",
+            "-pkeyopt",
+            "digest:sha256",
+        ],
+    );
+    // Request IDs remain single-use.
+    assert_eq!(
+        request(&f, "POST", &submit, None, Some(&valid), None, body)
+            .await
+            .0,
+        409
+    );
+    // Attestation-enabled and release policies fail closed with zero backend calls.
+    for policy in [attest_policy, release_policy] {
+        let token = mint(&f, claims.clone(), false, "RS256").await;
+        let scope = Scope { project, policy };
+        assert!(f.identity.workload(org, &token, &scope).await.is_ok());
+        let body = input(policy);
+        let id: Uuid = serde_json::from_value(body["request_id"].clone()).unwrap();
+        let before = calls.load(std::sync::atomic::Ordering::SeqCst);
+        let result = request(&f, "POST", &submit, None, Some(&token), None, body).await;
+        assert_eq!(result.0, 403);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), before);
+        let stored = f.store.tenant(org).sign_request(id).await.unwrap().unwrap();
+        assert_eq!(stored.state, RequestState::Rejected);
+        assert_eq!(stored.failure.as_deref(), Some("provider_purpose"));
+        assert!(stored.output.is_none() && stored.attestation.is_none());
+    }
+    // Every case is a correctly formed, signed token apart from the named change.
+    let now = auth::now();
+    let cases: Vec<(&str, Value, bool, &str)> = vec![
+        (
+            "wrong issuer",
+            json!({"iss":"https://unknown.invalid"}),
+            false,
+            "RS256",
+        ),
+        (
+            "wrong audience",
+            json!({"aud":"brigalow:other"}),
+            false,
+            "RS256",
+        ),
+        (
+            "foreign tenant audience",
+            json!({"aud":format!("brigalow:{}", orgs[1])}),
+            false,
+            "RS256",
+        ),
+        ("wrong key", json!({}), true, "RS256"),
+        ("alg none", json!({}), false, "none"),
+        ("expired", json!({"exp":now - 1}), false, "RS256"),
+        ("not yet valid", json!({"nbf":now + 300}), false, "RS256"),
+        (
+            "3601s lifetime",
+            json!({"iat":now,"exp":now + 3601}),
+            false,
+            "RS256",
+        ),
+        ("short ref_path", json!({"ref_path":"main"}), false, "RS256"),
+        (
+            "qualified short ref",
+            json!({"ref":"refs/heads/main"}),
+            false,
+            "RS256",
+        ),
+        (
+            "other branch",
+            json!({"ref":"feature","ref_path":"refs/heads/feature"}),
+            false,
+            "RS256",
+        ),
+        (
+            "ref_type mismatch",
+            json!({"ref_type":"tag"}),
+            false,
+            "RS256",
+        ),
+        (
+            "unprotected ref",
+            json!({"ref_protected":"false"}),
+            false,
+            "RS256",
+        ),
+        (
+            "bool ref_protected",
+            json!({"ref_protected":true}),
+            false,
+            "RS256",
+        ),
+        (
+            "missing environment",
+            json!({"environment":null}),
+            false,
+            "RS256",
+        ),
+        (
+            "wrong environment",
+            json!({"environment":"production"}),
+            false,
+            "RS256",
+        ),
+        (
+            "missing job project id",
+            json!({"job_project_id":null}),
+            false,
+            "RS256",
+        ),
+        (
+            "missing job project path",
+            json!({"job_project_path":null}),
+            false,
+            "RS256",
+        ),
+        (
+            "wrong job project id",
+            json!({"job_project_id":"4243"}),
+            false,
+            "RS256",
+        ),
+        (
+            "wrong project path",
+            json!({"project_path":"platform/other"}),
+            false,
+            "RS256",
+        ),
+        (
+            "mixed job/source project",
+            json!({"project_id":"99","project_path":"fork/app"}),
+            false,
+            "RS256",
+        ),
+        (
+            "merge request source",
+            json!({"pipeline_source":"merge_request_event"}),
+            false,
+            "RS256",
+        ),
+        (
+            "numeric project id",
+            json!({"project_id":4242,"job_project_id":4242}),
+            false,
+            "RS256",
+        ),
+        (
+            "array environment",
+            json!({"environment":["signing-test"]}),
+            false,
+            "RS256",
+        ),
+        ("numeric sha", json!({"sha":12345}), false, "RS256"),
+        ("short sha", json!({"sha":"714a629"}), false, "RS256"),
+        (
+            "canonical repository",
+            json!({"repository":"platform/app"}),
+            false,
+            "RS256",
+        ),
+        (
+            "canonical workflow",
+            json!({"workflow":".gitlab-ci.yml"}),
+            false,
+            "RS256",
+        ),
+        (
+            "spoofed provider",
+            json!({"provider":"github"}),
+            false,
+            "RS256",
+        ),
+    ];
+    // JSON null in a change removes the claim; a literal null claim is tested separately.
+    let mut null_environment = claims.clone();
+    null_environment["environment"] = Value::Null;
+    for (name, change, bad, alg) in cases {
+        let mut invalid = claims.clone();
+        for (k, v) in change.as_object().unwrap() {
+            if v.is_null() {
+                invalid.as_object_mut().unwrap().remove(k);
+            } else {
+                invalid[k] = v.clone();
+            }
+        }
+        let token = mint(&f, invalid, bad, alg).await;
+        assert!(
+            f.identity.workload(org, &token, &scope).await.is_err(),
+            "accepted {name}"
+        );
+        assert_eq!(
+            request(
+                &f,
+                "POST",
+                &submit,
+                None,
+                Some(&token),
+                None,
+                input(test_policy)
+            )
+            .await
+            .0,
+            401,
+            "{name}"
+        );
+    }
+    let token = mint(&f, null_environment, false, "RS256").await;
+    assert!(f.identity.workload(org, &token, &scope).await.is_err());
+    // Profile claim failures are audited by name after reverification.
+    let mut merge = claims.clone();
+    merge["pipeline_source"] = json!("merge_request_event");
+    let token = mint(&f, merge, false, "RS256").await;
+    let body = input(test_policy);
+    let id = body["request_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        request(&f, "POST", &submit, None, Some(&token), None, body)
+            .await
+            .0,
+        401
+    );
+    assert!(f
+        .store
+        .tenant(org)
+        .audit_page(0, 1000)
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.subject == id
+            && e.action == "request.rejected"
+            && e.details["reason"] == "claim:pipeline_source"));
+    // Cross-tenant object IDs are 404 under the authenticated organisation.
+    let foreign = format!("/v1/orgs/{org}/projects/{}/sign-requests", projects[1]);
+    for (path, policy) in [(&foreign, policies[1][0]), (&submit, policies[1][0])] {
+        assert_eq!(
+            request(&f, "POST", path, None, Some(&valid), None, input(policy))
+                .await
+                .0,
+            404
+        );
+    }
+    assert_eq!(
+        request(
+            &f,
+            "GET",
+            &format!("/v1/orgs/{org}/policies/{}", policies[1][0]),
+            None,
+            Some(&valid),
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        404
+    );
+    // The other tenant's routes have no authority for this token's audience.
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &format!(
+                "/v1/orgs/{}/projects/{}/sign-requests",
+                orgs[1], projects[1]
+            ),
+            None,
+            Some(&valid),
+            None,
+            input(policies[1][0])
+        )
+        .await
+        .0,
+        401
+    );
+    // GitHub authorities are unchanged: a GitLab-shaped token cannot satisfy them, and a
+    // GitHub token still yields the original claim set without a provider marker.
+    let github_scope = Scope {
+        project: f.objects[0][0],
+        policy: f.objects[0][2],
+    };
+    let mut gitlab_for_github = claims.clone();
+    gitlab_for_github["aud"] = json!(format!("brigalow:{}", f.orgs[0]));
+    let token = mint(&f, gitlab_for_github, false, "RS256").await;
+    assert!(f
+        .identity
+        .workload(f.orgs[0], &token, &github_scope)
+        .await
+        .is_err());
+    let token = mint(&f, json!({"aud":format!("brigalow:{}", f.orgs[0]),"repository":"acme/app","ref":"refs/heads/main","environment":"release","workflow":"build","ref_protected":true}), false, "RS256").await;
+    let github = f
+        .identity
+        .workload(f.orgs[0], &token, &github_scope)
+        .await
+        .unwrap();
+    assert_eq!(
+        github.claims,
+        BTreeMap::from(
+            [
+                ("iss", f.issuer.as_str()),
+                ("sub", "test-workload"),
+                ("repository", "acme/app"),
+                ("ref", "refs/heads/main"),
+                ("environment", "release"),
+                ("workflow", "build"),
+                ("ref_protected", "true"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+        )
+    );
+    // Expiry is rechecked after an earlier success.
+    let mut short = claims;
+    short["exp"] = json!(auth::now() + 2);
+    let token = mint(&f, short, false, "RS256").await;
+    assert!(f.identity.workload(org, &token, &scope).await.is_ok());
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(f.identity.workload(org, &token, &scope).await.is_err());
+    f.store.close().await;
+    f.admin.close().await;
+}
+
+/// AT-REC-01: interrupted `gating`/`signing` requests are inspectable read-only by
+/// human org admins/auditors; inspection mutates nothing and never reaches the backend.
+#[tokio::test]
+async fn at_rec_01_read_only_inspection_of_interrupted_requests() {
+    use brigalow_core::{
+        audit::Verifier,
+        keys::KeyRecord,
+        policy::{Policy, RequestState, Submission},
+        rbac::Principal,
+    };
+    let mut f = fixture().await;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    f.keys.backend = Arc::new(CountSigning {
+        backend: f.keys.backend.clone(),
+        calls: calls.clone(),
+    });
+    f.router = application(AppState {
+        rate_limit: Default::default(),
+        gates: Default::default(),
+        notifications: Default::default(),
+        store: f.store.clone(),
+        identity: Some(f.identity.clone()),
+        mode: Mode::Lab,
+        keys: Some(f.keys.clone()),
+        tsa: Some(f.tsa.clone()),
+    });
+    let org = f.orgs[0];
+    let project = f.objects[0][0];
+    let tenant = f.store.tenant(org);
+    let custodian = role_session(&f, "custodian", vec![Role::KeyCustodian]).await;
+    let auditor = role_session(&f, "auditor", vec![Role::Auditor]).await;
+    let approver = role_session(&f, "approver", vec![Role::Approver]).await;
+    let submitter_session = role_session(&f, "submitter", vec![Role::Submitter]).await;
+    let admin = login(&f, org).await;
+    let result = json_as(
+        &f,
+        &format!("/v1/orgs/{org}/projects/{project}/keys"),
+        &custodian,
+        json!({"algorithm":"p256","purpose":"test","offline":false}),
+    )
+    .await;
+    assert_eq!(result.0, 201);
+    let key: KeyRecord = serde_json::from_str(&result.2).unwrap();
+    assert_eq!(
+        json_as(
+            &f,
+            &format!("/v1/orgs/{org}/keys/{}/activate", key.key.id),
+            &custodian,
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    // Policies via the store: the gated one names a gate this router never runs.
+    let policy = |name: &str, gates: Vec<String>| Policy {
+        id: Uuid::new_v4(),
+        name: name.into(),
+        project,
+        key: key.key.id,
+        purpose: brigalow_core::Purpose::Test,
+        claims: Default::default(),
+        algorithms: vec![key.key.algorithm],
+        timestamp: brigalow_core::policy::Timestamp::Disabled,
+        approval: None,
+        gates,
+        attestation: false,
+    };
+    let direct = policy("rec-direct", vec![]);
+    let gated = policy("rec-gated", vec!["pass".into()]);
+    for p in [&direct, &gated] {
+        tenant.create_policy("fixture", p, true).await.unwrap();
+    }
+    let submitter = Principal {
+        org_id: org,
+        actor: "submitter".into(),
+        roles: vec![Role::Submitter],
+        scope: None,
+        human: false,
+        claims: Default::default(),
+    };
+    let submission = |policy: Uuid| -> Submission {
+        serde_json::from_value(json!({"request_id":Uuid::new_v4(),"policy":policy,"digest_alg":"sha256","digest":vec![9;32],"artifact_name":"interrupted.bin","format":"raw"})).unwrap()
+    };
+    // Simulate a crash after durable intent: prepare commits, `complete` never runs.
+    let signing = tenant
+        .prepare_sign(&submitter, project, submission(direct.id), true)
+        .await
+        .unwrap();
+    assert_eq!(signing.state, RequestState::Signing);
+    let gating = tenant
+        .prepare_sign(&submitter, project, submission(gated.id), true)
+        .await
+        .unwrap();
+    assert_eq!(gating.state, RequestState::Gating);
+    let path = |org: Uuid, id: Uuid| format!("/v1/orgs/{org}/requests/{id}/inspection");
+    let get = |session: &(String, String), path: String| {
+        let cookie = session.0.clone();
+        let f = &f;
+        async move { request(f, "GET", &path, Some(&cookie), None, None, Value::Null).await }
+    };
+    let snapshot = || async {
+        let rows: Vec<(Uuid, String, Option<Value>)> = sqlx::query_as(
+            "SELECT id,state,record FROM brigalow.sign_requests WHERE org_id=$1 ORDER BY id",
+        )
+        .bind(org)
+        .fetch_all(&f.admin)
+        .await
+        .unwrap();
+        let windows: Vec<(Uuid, i64)> =
+            sqlx::query_as("SELECT id,used FROM brigalow.release_windows WHERE org_id=$1")
+                .bind(org)
+                .fetch_all(&f.admin)
+                .await
+                .unwrap();
+        let ids: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM brigalow.request_ids WHERE org_id=$1")
+                .bind(org)
+                .fetch_one(&f.admin)
+                .await
+                .unwrap();
+        let head = tenant.audit_page(0, 1000).await.unwrap().len();
+        (serde_json::to_string(&rows).unwrap(), windows, ids, head)
+    };
+    // Not-interrupted requests are rejected rather than reported as outcome-unknown.
+    let rejected = tenant
+        .prepare_sign(
+            &Principal {
+                roles: vec![Role::Approver],
+                ..submitter.clone()
+            },
+            project,
+            submission(direct.id),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.state, RequestState::Rejected);
+    let secret = auth::random_secret();
+    tenant
+        .issue_credential(
+            &auth::hash(&secret),
+            &Principal {
+                scope: Some(Scope {
+                    project,
+                    policy: direct.id,
+                }),
+                ..submitter.clone()
+            },
+            None,
+            auth::now() + 600,
+            "fixture",
+        )
+        .await
+        .unwrap();
+    let before = snapshot().await;
+    for (session, expected) in [(&auditor, "signing"), (&admin, "signing")] {
+        let (status, _, body) = get(session, path(org, signing.submission.request_id)).await;
+        assert_eq!(status, 200, "{body}");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["state"], expected);
+        assert_eq!(v["outcome_unknown"], true);
+        assert_eq!(v["backend_invocation_possible"], true);
+        assert_eq!(v["policy"], json!(direct.id));
+        assert_eq!(v["key"], json!(key.key.id));
+        let actions: Vec<_> = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["action"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            actions,
+            ["request.submitted", "request.authorised", "request.signing"]
+        );
+        assert_eq!(v["events_truncated"], false);
+        // Bounded, public-only fields: no output, claims, digest, principal or credentials.
+        let fields: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(fields.len(), 9, "{fields:?}");
+        for secret in [&auditor.0, &auditor.1, &admin.0, &admin.1] {
+            let token = secret.rsplit('.').next().unwrap();
+            assert!(!body.contains(token));
+        }
+        assert!(body.len() < 4096);
+    }
+    let (status, _, body) = get(&auditor, path(org, gating.submission.request_id)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["state"], "gating");
+    assert_eq!(v["backend_invocation_possible"], false);
+    // Unauthorised roles, including workload/API credentials, cannot inspect.
+    for session in [&approver, &custodian, &submitter_session] {
+        assert_eq!(
+            get(session, path(org, signing.submission.request_id))
+                .await
+                .0,
+            403
+        );
+    }
+    assert_eq!(
+        request(
+            &f,
+            "GET",
+            &path(org, signing.submission.request_id),
+            None,
+            Some(&format!("brg_{org}.{secret}")),
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        403
+    );
+    // Unknown, placeholder and cross-tenant requests are 404; malformed IDs fail.
+    for id in [Uuid::new_v4(), f.objects[0][3], f.objects[1][3]] {
+        assert_eq!(get(&auditor, path(org, id)).await.0, 404);
+    }
+    assert_eq!(
+        get(&auditor, path(f.orgs[1], signing.submission.request_id))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        get(
+            &auditor,
+            format!("/v1/orgs/{org}/requests/not-a-uuid/inspection")
+        )
+        .await
+        .0,
+        400
+    );
+    // The route is GET-only: no mutation method exists for resolution.
+    for (method, _) in brigalow_server::recovery::ROUTES {
+        assert_eq!(method, "GET");
+    }
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            &path(org, signing.submission.request_id),
+            Some(&admin.0),
+            None,
+            Some(&admin.1),
+            json!({})
+        )
+        .await
+        .0,
+        405
+    );
+    assert_eq!(
+        get(&auditor, path(org, rejected.submission.request_id))
+            .await
+            .0,
+        409
+    );
+    // Not-interrupted requests are rejected rather than reported as outcome-unknown.
+    assert_eq!(
+        get(&auditor, path(org, rejected.submission.request_id))
+            .await
+            .0,
+        409
+    );
+    // No DB mutation, no audit append, no cap refund, no backend invocation.
+    assert_eq!(snapshot().await, before);
+    let still: brigalow_core::policy::SignRequest = tenant
+        .sign_request(signing.submission.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.state, RequestState::Signing);
+    assert!(still.output.is_none());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // The original request ID stays consumed.
+    assert!(matches!(
+        tenant
+            .prepare_sign(&submitter, project, signing.submission.clone(), true)
+            .await,
+        Err(brigalow_store::Error::Conflict)
+    ));
+    let mut verifier = Verifier::default();
+    for entry in tenant.audit_page(0, 1000).await.unwrap() {
+        verifier.push(&entry).unwrap();
+    }
+    verifier.finish().unwrap();
+    f.store.close().await;
+    f.admin.close().await;
+}
+
+/// Separate Identity/Router instance (own key-ring object and AppState) over a shared Postgres.
+fn ha_instance(
+    f: &Fixture,
+    store: &Store,
+    keys: LoginKeys,
+    limits: brigalow_store::login::LoginLimits,
+) -> Router {
+    application(AppState {
+        rate_limit: Default::default(),
+        store: store.clone(),
+        mode: Mode::Lab,
+        identity: Some(
+            Identity::with_pending_limits(
+                f.identity.config.clone(),
+                Mode::Lab,
+                Some(Arc::new(keys)),
+                limits,
+            )
+            .unwrap(),
+        ),
+        keys: None,
+        tsa: None,
+        notifications: Default::default(),
+        gates: Default::default(),
+    })
+}
+async fn token_exchanges(f: &Fixture, code: &str) -> i64 {
+    let response = f
+        .http
+        .get(format!("{}/exchanges", f.issuer))
+        .query(&[("code", code)])
+        .send()
+        .await
+        .unwrap();
+    response.json::<Value>().await.unwrap()["count"]
+        .as_i64()
+        .unwrap()
+}
+async fn pending_rows(f: &Fixture, org: Uuid, state: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM brigalow.pending_logins WHERE org_id=$1 AND state_hash=$2",
+    )
+    .bind(org)
+    .bind(auth::hash(state))
+    .fetch_one(&f.admin)
+    .await
+    .unwrap()
+}
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_ha_01_shared_login_state_across_instances() {
+    use brigalow_store::login::LoginLimits;
+    use tracing_subscriber::{filter::Targets, layer::SubscriberExt};
+    let logs = CapturedLogs::default();
+    let writer = logs.clone();
+    // Same application-only targets as production, at the most verbose level.
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone()),
+            )
+            .with(
+                Targets::new()
+                    .with_target("brigalow_server", tracing::Level::TRACE)
+                    .with_target("brigalow_store", tracing::Level::TRACE),
+            ),
+    )
+    .unwrap();
+    let f = fixture_with(DatabaseGuard::Exclusive(DATABASE.write().await)).await;
+    tracing::info!(target: "brigalow_server", "AT-HA-01 log capture active");
+    let (org, other_org) = (f.orgs[0], f.orgs[1]);
+    let k1 = || LoginKeys::new(("k1", &f.login_material), &[]).unwrap();
+    let rotated_material = login_material();
+    let store_a = Store::connect(runtime_options()).await.unwrap();
+    let store_b = Store::connect(runtime_options()).await.unwrap();
+    let a = ha_instance(&f, &store_a, k1(), auth::PENDING_LIMITS);
+    let b = ha_instance(&f, &store_b, k1(), auth::PENDING_LIMITS);
+    let mut observed = Vec::new();
+
+    // Human login cannot start without an operator-provisioned key ring.
+    assert!(Identity::new(f.identity.config.clone(), Mode::Lab, None).is_err());
+
+    // Begun at A, completed at B. A restarted/removed instance does not strand the login.
+    let restarted_store = Store::connect(runtime_options()).await.unwrap();
+    let restarted = ha_instance(&f, &restarted_store, k1(), auth::PENDING_LIMITS);
+    let login = begin_at(&f, &restarted, org, "valid").await;
+    drop(restarted);
+    restarted_store.close().await;
+    assert_eq!(pending_rows(&f, org, &login.state).await, 1);
+    let (status, headers) =
+        complete_at(&b, org, "valid", &login.cookie, &login.state, &login.code).await;
+    assert_eq!(status, 303);
+    assert!(headers
+        .get_all("set-cookie")
+        .iter()
+        .any(|h| h.to_str().unwrap().starts_with("__Host-brigalow=")));
+    assert_eq!(pending_rows(&f, org, &login.state).await, 0);
+    assert_eq!(token_exchanges(&f, &login.code).await, 1);
+    let login = begin_at(&f, &b, org, "valid").await;
+    assert_eq!(
+        complete_at(&a, org, "valid", &login.cookie, &login.state, &login.code)
+            .await
+            .0,
+        303
+    );
+
+    // Racing callbacks on both instances: exactly one consumption and one token exchange.
+    let login = begin_at(&f, &a, org, "valid").await;
+    let racers = (0..12).map(|i| {
+        let router = if i % 2 == 0 { a.clone() } else { b.clone() };
+        let (cookie, state, code) = (
+            login.cookie.clone(),
+            login.state.clone(),
+            login.code.clone(),
+        );
+        tokio::spawn(async move {
+            complete_at(&router, org, "valid", &cookie, &state, &code)
+                .await
+                .0
+        })
+    });
+    let statuses: Vec<StatusCode> = futures_util::future::join_all(racers)
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(statuses.iter().filter(|s| **s == 303).count(), 1);
+    assert_eq!(statuses.iter().filter(|s| **s == 401).count(), 11);
+    assert_eq!(token_exchanges(&f, &login.code).await, 1);
+
+    // A wrong browser, organisation or provider is rejected without consuming the state.
+    let login = begin_at(&f, &a, org, "valid").await;
+    observed.extend([
+        login.state.clone(),
+        login.code.clone(),
+        login.cookie.clone(),
+    ]);
+    for (router, target, provider, cookie) in [
+        (&b, org, "valid", "__Host-brigalow-login=attacker"),
+        (&a, org, "valid", "__Host-brigalow-login="),
+        (&b, other_org, "valid", login.cookie.as_str()),
+        (&b, org, "expired", login.cookie.as_str()),
+        (&b, org, "unconfigured", login.cookie.as_str()),
+    ] {
+        assert_eq!(
+            complete_at(router, target, provider, cookie, &login.state, &login.code)
+                .await
+                .0,
+            401
+        );
+        assert_eq!(pending_rows(&f, org, &login.state).await, 1);
+    }
+    assert_eq!(token_exchanges(&f, &login.code).await, 0);
+    assert_eq!(
+        complete_at(&b, org, "valid", &login.cookie, &login.state, &login.code)
+            .await
+            .0,
+        303
+    );
+    // The other organisation cannot see, consume or clean another tenant's pending state.
+    let login = begin_at(&f, &a, other_org, "valid").await;
+    // Tenant-scoped cleanup runs under RLS for its own organisation only.
+    f.store.tenant(org).cleanup_pending_logins().await.unwrap();
+    assert_eq!(pending_rows(&f, other_org, &login.state).await, 1);
+    assert_eq!(
+        complete_at(
+            &a,
+            other_org,
+            "valid",
+            &login.cookie,
+            &login.state,
+            &login.code
+        )
+        .await
+        .0,
+        303
+    );
+
+    // Database-clock expiry: an expired row is refused, never exchanged, then cleaned up.
+    let short = ha_instance(
+        &f,
+        &store_a,
+        k1(),
+        LoginLimits {
+            lifetime_ms: 1000,
+            ..auth::PENDING_LIMITS
+        },
+    );
+    let expired = begin_at(&f, &short, org, "valid").await;
+    let live = begin_at(&f, &a, org, "valid").await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        complete_at(
+            &b,
+            org,
+            "valid",
+            &expired.cookie,
+            &expired.state,
+            &expired.code
+        )
+        .await
+        .0,
+        401
+    );
+    assert_eq!(token_exchanges(&f, &expired.code).await, 0);
+    assert_eq!(pending_rows(&f, org, &expired.state).await, 1);
+    f.store.tenant(org).cleanup_pending_logins().await.unwrap();
+    assert_eq!(pending_rows(&f, org, &expired.state).await, 0);
+    assert_eq!(pending_rows(&f, org, &live.state).await, 1);
+    assert_eq!(
+        complete_at(&b, org, "valid", &live.cookie, &live.state, &live.code)
+            .await
+            .0,
+        303
+    );
+
+    // Key rotation: unknown key IDs and wrong material reject without consuming.
+    let rotated_only = ha_instance(
+        &f,
+        &store_b,
+        LoginKeys::new(("k2", &rotated_material), &[]).unwrap(),
+        auth::PENDING_LIMITS,
+    );
+    let rotating = ha_instance(
+        &f,
+        &store_b,
+        LoginKeys::new(("k2", &rotated_material), &[("k1", &f.login_material)]).unwrap(),
+        auth::PENDING_LIMITS,
+    );
+    let impostor_material = login_material();
+    let impostor = ha_instance(
+        &f,
+        &store_b,
+        LoginKeys::new(("k1", &impostor_material), &[]).unwrap(),
+        auth::PENDING_LIMITS,
+    );
+    let login = begin_at(&f, &a, org, "valid").await;
+    for router in [&rotated_only, &impostor] {
+        assert_eq!(
+            complete_at(
+                router,
+                org,
+                "valid",
+                &login.cookie,
+                &login.state,
+                &login.code
+            )
+            .await
+            .0,
+            401
+        );
+    }
+    assert_eq!(pending_rows(&f, org, &login.state).await, 1);
+    assert_eq!(
+        complete_at(
+            &rotating,
+            org,
+            "valid",
+            &login.cookie,
+            &login.state,
+            &login.code
+        )
+        .await
+        .0,
+        303
+    );
+    let login = begin_at(&f, &rotating, org, "valid").await;
+    let key_id: String = sqlx::query_scalar(
+        "SELECT key_id FROM brigalow.pending_logins WHERE org_id=$1 AND state_hash=$2",
+    )
+    .bind(org)
+    .bind(auth::hash(&login.state))
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(key_id, "k2");
+    assert_eq!(
+        complete_at(&a, org, "valid", &login.cookie, &login.state, &login.code)
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        complete_at(
+            &rotated_only,
+            org,
+            "valid",
+            &login.cookie,
+            &login.state,
+            &login.code
+        )
+        .await
+        .0,
+        303
+    );
+
+    // Tampered ciphertext, nonce or authenticated row fields fail AEAD and never exchange.
+    let attacker = "attacker-browser";
+    let donor = begin_at(&f, &a, org, "valid").await;
+    for tamper in [
+        "UPDATE brigalow.pending_logins SET ciphertext=set_byte(ciphertext,0,get_byte(ciphertext,0) # 1) WHERE org_id=$1 AND state_hash=$2",
+        "UPDATE brigalow.pending_logins SET ciphertext=substring(ciphertext from 1 for length(ciphertext)-1) WHERE org_id=$1 AND state_hash=$2",
+        "UPDATE brigalow.pending_logins SET nonce=set_byte(nonce,0,get_byte(nonce,0) # 1) WHERE org_id=$1 AND state_hash=$2",
+        "UPDATE brigalow.pending_logins SET expires_ms=expires_ms+60000 WHERE org_id=$1 AND state_hash=$2",
+        "UPDATE brigalow.pending_logins SET key_id='unknown' WHERE org_id=$1 AND state_hash=$2",
+        "UPDATE brigalow.pending_logins p SET nonce=d.nonce, ciphertext=d.ciphertext FROM brigalow.pending_logins d WHERE p.org_id=$1 AND p.state_hash=$2 AND d.org_id=$1 AND d.state_hash=$3",
+        "UPDATE brigalow.pending_logins SET browser_hash=$4 WHERE org_id=$1 AND state_hash=$2",
+    ] {
+        let login = begin_at(&f, &a, org, "valid").await;
+        let changed = sqlx::query(sqlx::AssertSqlSafe(tamper))
+            .bind(org)
+            .bind(auth::hash(&login.state))
+            .bind(auth::hash(&donor.state))
+            .bind(auth::hash(attacker))
+            .execute(&f.admin)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(changed, 1);
+        // Even a DB writer that rebinds the row to its own browser cannot complete the login.
+        let cookie = if tamper.contains("browser_hash") {
+            format!("__Host-brigalow-login={attacker}")
+        } else {
+            login.cookie.clone()
+        };
+        assert_eq!(
+            complete_at(&b, org, "valid", &cookie, &login.state, &login.code)
+                .await
+                .0,
+            401
+        );
+        assert_eq!(token_exchanges(&f, &login.code).await, 0);
+    }
+
+    // Database inspection: the verifier and nonce exist only as authenticated ciphertext.
+    let login = begin_at(&f, &a, org, "valid").await;
+    observed.extend([
+        login.nonce.clone(),
+        login.state.clone(),
+        login.cookie.clone(),
+    ]);
+    let (browser_hash, expires_ms, nonce, ciphertext, row_text): (String, i64, Vec<u8>, Vec<u8>, String) =
+        sqlx::query_as("SELECT browser_hash,expires_ms,nonce,ciphertext,row_to_json(p)::text FROM brigalow.pending_logins p WHERE org_id=$1 AND state_hash=$2")
+            .bind(org)
+            .bind(auth::hash(&login.state))
+            .fetch_one(&f.admin)
+            .await
+            .unwrap();
+    let state_hash = auth::hash(&login.state);
+    let plaintext = k1()
+        .open(
+            "k1",
+            &auth::login_keys::aad(org, "valid", &state_hash, &browser_hash, expires_ms, "k1"),
+            &nonce,
+            &ciphertext,
+        )
+        .unwrap();
+    let (verifier, stored_nonce) = auth::login_keys::decode_secrets(&plaintext).unwrap();
+    use base64::Engine;
+    use sha2::Digest;
+    assert_eq!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes())),
+        login.challenge
+    );
+    assert_eq!(stored_nonce, login.nonce);
+    observed.push(verifier.to_owned());
+    let everything: String = sqlx::query_scalar(
+        "SELECT coalesce((SELECT string_agg(row_to_json(p)::text, '') FROM brigalow.pending_logins p),'') \
+         || coalesce((SELECT string_agg(row_to_json(i)::text, '') FROM brigalow.pending_login_inventory i),'') \
+         || coalesce((SELECT string_agg(row_to_json(k)::text, '') FROM brigalow.pending_login_key_usage k),'')",
+    )
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    let cookie_value = login.cookie.split_once('=').unwrap().1;
+    for secret in [verifier, stored_nonce, login.state.as_str(), cookie_value] {
+        assert!(!row_text.contains(secret) && !everything.contains(secret));
+        for raw in [&nonce, &ciphertext] {
+            assert!(!raw.windows(secret.len()).any(|w| w == secret.as_bytes()));
+        }
+    }
+    for hex in [&f.login_material, &rotated_material] {
+        let hex: String = hex.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(!everything.contains(&hex));
+    }
+    assert_eq!(
+        complete_at(&b, org, "valid", &login.cookie, &login.state, &login.code)
+            .await
+            .0,
+        303
+    );
+    // Forced RLS and least privilege: no UPDATE grant, so rows are consumed only by DELETE.
+    for table in ["pending_logins", "pending_login_inventory"] {
+        let grants: Vec<String> = sqlx::query_scalar("SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee='brigalow_app' AND table_schema='brigalow' AND table_name=$1 ORDER BY privilege_type")
+            .bind(table).fetch_all(&f.admin).await.unwrap();
+        assert_eq!(grants, ["DELETE", "INSERT", "SELECT"]);
+    }
+    let (rls, forced): (bool, bool) = sqlx::query_as("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid='brigalow.pending_logins'::regclass")
+        .fetch_one(&f.admin).await.unwrap();
+    assert!(rls && forced);
+    let runtime = PgPool::connect_with(runtime_options()).await.unwrap();
+    assert!(
+        sqlx::query("UPDATE brigalow.pending_logins SET expires_ms=0")
+            .execute(&runtime)
+            .await
+            .is_err()
+    );
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM brigalow.pending_logins")
+        .fetch_one(&runtime)
+        .await
+        .unwrap();
+    assert_eq!(visible, 0, "rows are invisible without tenant context");
+    runtime.close().await;
+
+    // Database failure rejects login and callback; there is no in-memory fallback.
+    let dead_store = Store::connect(runtime_options()).await.unwrap();
+    dead_store.close().await;
+    let dead = ha_instance(&f, &dead_store, k1(), auth::PENDING_LIMITS);
+    let (status, headers, _) = request_at(
+        &dead,
+        "GET",
+        &format!("/auth/{org}/valid/login"),
+        None,
+        None,
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, 401);
+    assert!(headers.get("set-cookie").is_none());
+    let login = begin_at(&f, &a, org, "valid").await;
+    assert_eq!(
+        complete_at(
+            &dead,
+            org,
+            "valid",
+            &login.cookie,
+            &login.state,
+            &login.code
+        )
+        .await
+        .0,
+        401
+    );
+    assert_eq!(token_exchanges(&f, &login.code).await, 0);
+    assert_eq!(
+        complete_at(&b, org, "valid", &login.cookie, &login.state, &login.code)
+            .await
+            .0,
+        303
+    );
+
+    // Bounded inventory under concurrent creation from two instances. Stale rows left by
+    // earlier tests are removed first; this test holds the exclusive database guard.
+    let reset = || async {
+        sqlx::query("DELETE FROM brigalow.pending_logins")
+            .execute(&f.admin)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM brigalow.pending_login_inventory")
+            .execute(&f.admin)
+            .await
+            .unwrap();
+    };
+    let burst = |routers: [Router; 2], orgs: Vec<Uuid>| async move {
+        let tasks = orgs.into_iter().enumerate().map(|(i, target)| {
+            let router = routers[i % 2].clone();
+            tokio::spawn(async move {
+                request_at(
+                    &router,
+                    "GET",
+                    &format!("/auth/{target}/valid/login"),
+                    None,
+                    None,
+                    None,
+                    Value::Null,
+                )
+                .await
+                .0
+            })
+        });
+        futures_util::future::join_all(tasks)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+    };
+    let count = |target: Option<Uuid>| {
+        let admin = f.admin.clone();
+        async move {
+            let sql = if target.is_some() {
+                "SELECT count(*) FROM brigalow.pending_logins WHERE org_id=$1"
+            } else {
+                "SELECT count(*) FROM brigalow.pending_login_inventory WHERE $1::uuid IS NULL"
+            };
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(target)
+                .fetch_one(&admin)
+                .await
+                .unwrap()
+        }
+    };
+    reset().await;
+    let tenant_limit = LoginLimits {
+        per_org: 3,
+        global: 1000,
+        ..auth::PENDING_LIMITS
+    };
+    let statuses = burst(
+        [
+            ha_instance(&f, &store_a, k1(), tenant_limit),
+            ha_instance(&f, &store_b, k1(), tenant_limit),
+        ],
+        vec![org; 12],
+    )
+    .await;
+    assert_eq!(statuses.iter().filter(|s| **s == 303).count(), 3);
+    assert_eq!(statuses.iter().filter(|s| **s == 401).count(), 9);
+    assert_eq!(count(Some(org)).await, 3);
+    reset().await;
+    let global_limit = LoginLimits {
+        per_org: 5,
+        global: 8,
+        ..auth::PENDING_LIMITS
+    };
+    let statuses = burst(
+        [
+            ha_instance(&f, &store_a, k1(), global_limit),
+            ha_instance(&f, &store_b, k1(), global_limit),
+        ],
+        (0..30).map(|i| f.orgs[i % 2]).collect(),
+    )
+    .await;
+    assert_eq!(statuses.iter().filter(|s| **s == 303).count(), 8);
+    assert!(count(Some(org)).await <= 5 && count(Some(other_org)).await <= 5);
+    assert_eq!(count(Some(org)).await + count(Some(other_org)).await, 8);
+    assert_eq!(count(None).await, 8);
+    reset().await;
+
+    // Per-key encryption budget is shared across instances and fails closed when spent.
+    let budget_id = format!("budget-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let budget = LoginLimits {
+        max_seals: 2,
+        ..auth::PENDING_LIMITS
+    };
+    let routers = [
+        ha_instance(
+            &f,
+            &store_a,
+            LoginKeys::new((&budget_id, &f.login_material), &[]).unwrap(),
+            budget,
+        ),
+        ha_instance(
+            &f,
+            &store_b,
+            LoginKeys::new((&budget_id, &f.login_material), &[]).unwrap(),
+            budget,
+        ),
+    ];
+    let statuses = burst(routers, vec![org; 6]).await;
+    assert_eq!(statuses.iter().filter(|s| **s == 303).count(), 2);
+    assert_eq!(count(Some(org)).await, 2);
+    reset().await;
+
+    // No verifier, nonce, state, code, browser binding or key material in application logs.
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("AT-HA-01 log capture active"));
+    use base64::engine::general_purpose::STANDARD;
+    for secret in observed.iter().map(String::as_str).chain([
+        STANDARD.encode(f.login_material).as_str(),
+        STANDARD.encode(rotated_material).as_str(),
+        STANDARD.encode(impostor_material).as_str(),
+    ]) {
+        assert!(!secret.is_empty() && !text.contains(secret));
+    }
+    store_a.close().await;
+    store_b.close().await;
+}
+#[cfg(feature = "tool-tests")]
+#[path = "support/operator_release.rs"]
+mod operator_release;

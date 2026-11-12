@@ -8,7 +8,7 @@ use brigalow_store::Store;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
 async fn run() -> Result<(), &'static str> {
-    let config = Config::load().map_err(|error| {
+    let mut config = Config::load().map_err(|error| {
         tracing::error!(%error, "configuration rejected");
         "invalid configuration"
     })?;
@@ -18,13 +18,18 @@ async fn run() -> Result<(), &'static str> {
             tracing::error!(%error, "server configuration rejected");
             "invalid server configuration"
         })?;
+    let login_keys = config.take_login_keys().map(std::sync::Arc::new);
     let identity = match std::env::var("BRIGALOW_IDENTITY_FILE") {
         Ok(path) => {
             let bytes = std::fs::read(path).map_err(|_| "cannot read identity configuration")?;
             let settings: IdentityConfig =
                 serde_json::from_slice(&bytes).map_err(|_| "invalid identity configuration")?;
+            let human = settings.authorities.iter().any(|a| a.human.is_some());
+            if human && login_keys.is_none() {
+                return Err("human OIDC login requires [login_keys] configuration");
+            }
             Some(
-                Identity::new(settings, config.mode)
+                Identity::new(settings, config.mode, login_keys)
                     .map_err(|_| "invalid identity configuration")?,
             )
         }
@@ -118,6 +123,9 @@ async fn run() -> Result<(), &'static str> {
                 for org in &orgs {
                     if store.tenant(*org).expire_requests().await.is_err() {
                         tracing::warn!("approval expiry maintenance failed");
+                    }
+                    if store.tenant(*org).cleanup_pending_logins().await.is_err() {
+                        tracing::warn!("pending login cleanup failed");
                     }
                 }
             }

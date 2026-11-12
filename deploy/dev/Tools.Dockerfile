@@ -29,5 +29,5 @@ COPY --from=tools-build /work/target/debug/brigalow-ca /work/target/debug/brigal
 COPY --from=tools-build /work/target/debug/brigalow-audit /work/target/debug/brigalow-audit
 COPY deploy/dev ./deploy/dev
 COPY actions ./actions
-COPY scripts/verify_release.py ./scripts/verify_release.py
+COPY scripts/verify_release.py scripts/package_release.py scripts/operator_release.py ./scripts/
 ENTRYPOINT ["/tool-tests", "tool", "--nocapture", "--test-threads=1"]

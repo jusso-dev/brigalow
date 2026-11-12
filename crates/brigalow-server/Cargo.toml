@@ -50,7 +50,8 @@ futures-util = "0.3"
 rustix = { version = "1.1.6", default-features = false, features = ["fs", "process", "std"] }
 
 [features]
-integration = []
+# Exposes test-only loopback seams (for example a mock IMDS); never enabled in release builds.
+integration = ["brigalow-crypto/integration"]
 tool-tests = ["integration"]
 
 [dev-dependencies]

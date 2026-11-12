@@ -3089,6 +3089,8 @@ async fn at_ops_02_per_credential_rate_limits_and_audit() {
     f.admin.close().await;
 }
 
+#[path = "support/artifact_signing.rs"]
+mod artifact_signing;
 #[cfg(feature = "tool-tests")]
 #[path = "support/csc.rs"]
 mod csc;

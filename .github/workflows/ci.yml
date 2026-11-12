@@ -27,6 +27,8 @@ jobs:
         run: python3 scripts/test_production.py
       - name: Release packaging tests
         run: python3 scripts/test_release.py
+      - name: Azure reference offline tests (az bicep template check skips without az)
+        run: python3 deploy/azure/test_azure.py
       - name: Test
         run: cargo test --locked --workspace
       - name: Compose acceptance tests

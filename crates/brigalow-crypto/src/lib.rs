@@ -1,4 +1,5 @@
 //! Signing custody boundary. This API deliberately has no private-key export operation.
+pub mod artifact_signing;
 pub mod attestation;
 pub mod audit;
 pub mod certificates;
@@ -6,6 +7,7 @@ pub mod cms;
 pub mod csc_mock;
 pub mod pkcs11;
 pub mod private_ca;
+pub mod rotating;
 pub mod software;
 pub mod timestamp;
 pub use brigalow_core::keys::{Algorithm, DigestAlgorithm, Key};
@@ -53,6 +55,28 @@ pub trait KeyBackend: Send + Sync {
     }
     fn disable(&self, key: &Key) -> Result<()>;
     fn is_lab(&self) -> bool;
+    /// True for backends whose key and certificate rotate, so no public key can be pinned.
+    /// PKCS#11, software and CSC mock backends keep the pinned-public-key contract (false).
+    fn rotates(&self) -> bool {
+        false
+    }
+    /// Operator-pinned identity every rotating result must prove.
+    fn rotating(&self, _key: &Key) -> Result<rotating::Expectation> {
+        Err(Error::Unavailable)
+    }
+    /// One untrusted remote attempt for a rotating key. Callers must use [`rotating::sign`],
+    /// which validates the returned chain and signature before anything is output.
+    /// `accepted` is called with the remote operation ID as soon as the service accepts the
+    /// request, before polling, so the caller can record it durably even if this attempt is
+    /// later abandoned. If it returns an error the attempt stops without polling.
+    fn sign_rotating(
+        &self,
+        _key: &Key,
+        _digest: &[u8],
+        _accepted: &dyn Fn(&str) -> Result<()>,
+    ) -> rotating::Attempt {
+        rotating::Attempt::failed(None, Error::Unavailable)
+    }
 }
 pub fn check_digest(digest: &[u8]) -> Result<()> {
     if digest.len() != 32 {

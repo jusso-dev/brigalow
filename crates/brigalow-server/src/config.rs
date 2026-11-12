@@ -32,6 +32,7 @@ pub enum Backend {
     Software,
     Pkcs11,
     CscMock,
+    ArtifactSigning,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +122,108 @@ impl CscMockConfig {
     }
 }
 
+/// Azure Artifact Signing. Identifiers and paths only: the credential is a managed-identity
+/// token from the fixed IMDS address, never configuration.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSigningConfig {
+    /// `https://<region>.codesigning.azure.net`. Lab mode alone may use a loopback HTTPS origin.
+    pub endpoint: String,
+    /// PEM root for a lab loopback origin only. Azure endpoints use the built-in WebPKI roots.
+    pub tls_ca_file: Option<PathBuf>,
+    /// Client ID of a user-assigned managed identity (not a secret).
+    pub managed_identity_client_id: Option<uuid::Uuid>,
+    /// Total deadline for one submit-and-poll operation, 1 to 25 seconds (default 20).
+    pub operation_timeout_seconds: Option<u64>,
+    /// May be empty on first start (project UUIDs exist only after bootstrap). With no bindings,
+    /// no key can be registered or used.
+    #[serde(default)]
+    pub bindings: Vec<ArtifactSigningBindingConfig>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSigningBindingConfig {
+    pub id: uuid::Uuid,
+    pub org: uuid::Uuid,
+    pub project: uuid::Uuid,
+    pub purpose: brigalow_core::Purpose,
+    pub account: String,
+    pub profile: String,
+    /// Name of a `[[trust_anchors]]` entry: the pinned issuing root every result must chain to.
+    pub anchor: String,
+    /// Profile-specific EKU (`1.3.6.1.4.1.311.97.` prefix) every returned leaf must carry.
+    pub profile_eku: String,
+}
+pub(crate) fn bounded_file(path: &Path) -> Result<Vec<u8>, ConfigError> {
+    let file = std::fs::File::open(path)
+        .map_err(|_| ConfigError("cannot read Artifact Signing certificate"))?;
+    let mut bytes = Vec::new();
+    file.take(65537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ConfigError("cannot read Artifact Signing certificate"))?;
+    if bytes.is_empty() || bytes.len() > 65536 {
+        return Err(ConfigError("Artifact Signing certificate size invalid"));
+    }
+    Ok(bytes)
+}
+impl ArtifactSigningConfig {
+    pub fn settings(
+        &self,
+        mode: Mode,
+        anchors: &[AnchorConfig],
+    ) -> Result<brigalow_crypto::artifact_signing::Settings, ConfigError> {
+        use brigalow_crypto::artifact_signing::{Binding, Settings, MAX_OPERATION_TIMEOUT};
+        let seconds = self.operation_timeout_seconds.unwrap_or(20);
+        if seconds == 0 || seconds > MAX_OPERATION_TIMEOUT.as_secs() {
+            return Err(ConfigError(
+                "Artifact Signing operation timeout must be 1 to 25 seconds",
+            ));
+        }
+        if self.tls_ca_file.is_some() && mode != Mode::Lab {
+            return Err(ConfigError(
+                "Artifact Signing test TLS roots require lab mode",
+            ));
+        }
+        let bindings = self
+            .bindings
+            .iter()
+            .map(|b| {
+                let anchor = anchors
+                    .iter()
+                    .find(|a| a.name == b.anchor)
+                    .ok_or(ConfigError(
+                        "Artifact Signing anchor must name a trust anchor",
+                    ))?;
+                // Microsoft operates this CA: an outside CA, never Brigalow's private tier.
+                if anchor.tier != brigalow_core::TrustTier::ExternalCa {
+                    return Err(ConfigError(
+                        "Artifact Signing anchor must be an external-ca trust anchor",
+                    ));
+                }
+                Binding::new(
+                    b.id,
+                    b.org,
+                    b.project,
+                    b.purpose,
+                    &b.account,
+                    &b.profile,
+                    bounded_file(&anchor.file)?,
+                    &b.profile_eku,
+                )
+                .map_err(|_| ConfigError("invalid Artifact Signing binding"))
+            })
+            .collect::<Result<Vec<_>, ConfigError>>()?;
+        Ok(Settings {
+            endpoint: self.endpoint.clone(),
+            tls_ca_pem: self.tls_ca_file.as_deref().map(bounded_file).transpose()?,
+            lab: mode == Mode::Lab,
+            managed_identity_client_id: self.managed_identity_client_id,
+            operation_timeout: std::time::Duration::from_secs(seconds),
+            bindings,
+        })
+    }
+}
+
 /// Paths and IDs only. Each file holds base64 for exactly 32 random bytes, mode 0600.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,6 +286,7 @@ pub struct Config {
     pub trust_anchors: Vec<AnchorConfig>,
     pub tsa: Option<TsaConfig>,
     pub csc_mock: Option<CscMockConfig>,
+    pub artifact_signing: Option<ArtifactSigningConfig>,
     pub notifications: Vec<crate::notifications::Config>,
     pub gates: Vec<crate::gates::Config>,
     login_keys: Option<crate::auth::login_keys::LoginKeys>,
@@ -224,6 +328,7 @@ struct FileConfig {
     trust_anchors: Option<Vec<AnchorConfig>>,
     tsa: Option<TsaConfig>,
     csc_mock: Option<CscMockConfig>,
+    artifact_signing: Option<ArtifactSigningConfig>,
     notifications: Option<Vec<crate::notifications::Config>>,
     gates: Option<Vec<crate::gates::Config>>,
     login_keys: Option<LoginKeysConfig>,
@@ -278,8 +383,10 @@ impl Config {
     /// Server startup only: owner tools intentionally do not load a signing backend.
     pub fn require_server(&self, identity_present: bool) -> Result<(), ConfigError> {
         if self.mode == Mode::Production {
-            if self.backend != Backend::Pkcs11 {
-                return Err(ConfigError("production server requires PKCS#11 backend"));
+            if !matches!(self.backend, Backend::Pkcs11 | Backend::ArtifactSigning) {
+                return Err(ConfigError(
+                    "production server requires PKCS#11 backend (or artifact_signing)",
+                ));
             }
             if !identity_present {
                 return Err(ConfigError(
@@ -355,6 +462,7 @@ impl Config {
             Some("software") => Backend::Software,
             Some("pkcs11") => Backend::Pkcs11,
             Some("csc_mock") => Backend::CscMock,
+            Some("artifact_signing") => Backend::ArtifactSigning,
             Some("disabled") => Backend::Disabled,
             None => file.backend.unwrap_or_default(),
             _ => return Err(ConfigError("invalid key backend")),
@@ -382,6 +490,7 @@ impl Config {
             trust_anchors: file.trust_anchors.unwrap_or_default(),
             tsa: file.tsa,
             csc_mock: file.csc_mock,
+            artifact_signing: file.artifact_signing,
             notifications: file.notifications.unwrap_or_default(),
             gates: file.gates.unwrap_or_default(),
             login_keys: file
@@ -442,6 +551,15 @@ impl Config {
                         .backend()?,
                 )
             }
+            Backend::ArtifactSigning => std::sync::Arc::new(
+                brigalow_crypto::artifact_signing::ArtifactSigning::new(
+                    self.artifact_signing
+                        .as_ref()
+                        .ok_or(ConfigError("Artifact Signing configuration required"))?
+                        .settings(self.mode, &self.trust_anchors)?,
+                )
+                .map_err(|_| ConfigError("Artifact Signing startup failed; no fallback allowed"))?,
+            ),
             Backend::Software => std::sync::Arc::new(
                 Software::new(self.mode == Mode::Lab)
                     .map_err(|_| ConfigError("software backend requires lab mode"))?,
@@ -549,6 +667,59 @@ mod tests {
         )
         .unwrap();
         assert!(config.key_backend().is_err());
+    }
+    #[test]
+    fn artifact_signing_config_has_no_credentials_and_fails_closed() {
+        let secret = uuid::Uuid::new_v4().to_string();
+        let env = [("BRIGALOW_DB_PASSWORD", secret.as_str())];
+        let base = "mode='production'\nbackend='artifact_signing'\n[[trust_anchors]]\nname='azure'\ntier='external-ca'\nfile='/nonexistent/root.der'\n[artifact_signing]\nendpoint='https://eus.codesigning.azure.net'\n[[artifact_signing.bindings]]\nid='11111111-1111-4111-8111-111111111111'\norg='22222222-2222-4222-8222-222222222222'\nproject='33333333-3333-4333-8333-333333333333'\npurpose='release'\naccount='brigalow'\nprofile='release-profile'\nanchor='azure'\nprofile_eku='1.3.6.1.4.1.311.97.1.2.3'\n";
+        let config = load(base, &env).unwrap();
+        assert_eq!(config.backend, Backend::ArtifactSigning);
+        // Allowed in production mode; the unreadable anchor fails startup with no fallback.
+        config.require_server(true).unwrap();
+        assert!(config.key_backend().is_err());
+        assert!(load(&base.replace("backend='artifact_signing'", ""), &env)
+            .unwrap()
+            .require_server(true)
+            .is_err());
+        // Credentials and IMDS addresses are not configuration.
+        for extra in [
+            "access_token_file='/run/token'\n",
+            "client_secret='x'\n",
+            "imds_url='http://127.0.0.1'\n",
+        ] {
+            let text = base.replace(
+                "[artifact_signing]\n",
+                &format!("[artifact_signing]\n{extra}"),
+            );
+            assert!(load(&text, &env).is_err(), "{extra}");
+        }
+        for (from, to) in [
+            ("tier='external-ca'", "tier='private'"),
+            ("anchor='azure'", "anchor='missing'"),
+        ] {
+            let config = load(&base.replace(from, to), &env).unwrap();
+            assert!(config.key_backend().is_err(), "{to}");
+        }
+        // Test TLS roots belong to lab mode only.
+        let text = base.replace(
+            "[artifact_signing]\n",
+            "[artifact_signing]\ntls_ca_file='/nonexistent/ca.pem'\n",
+        );
+        assert!(load(&text, &env)
+            .unwrap()
+            .key_backend()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("lab mode"));
+        for timeout in ["0", "26"] {
+            let text = base.replace(
+                "[artifact_signing]\n",
+                &format!("[artifact_signing]\noperation_timeout_seconds={timeout}\n"),
+            );
+            assert!(load(&text, &env).unwrap().key_backend().is_err());
+        }
     }
     #[test]
     #[cfg(unix)]

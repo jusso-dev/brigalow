@@ -2,7 +2,7 @@
 
 This directory supplies deployment configuration, not a running production service. Use the exact tested revision, an operator-reviewed image including your vendor PKCS#11 provider, external PostgreSQL with verified TLS, a configured RS256 OIDC provider and operator-supplied TLS certificates. No CA purchase, cloud account or production deployment is performed by these files or tests.
 
-Supported topology: one server, one TLS proxy, external Postgres and a vendor HSM. In-progress OIDC login state is process-local: restarting the server requires restarting that login. Existing authenticated sessions remain in Postgres. Do not scale beyond one server; the Helm chart rejects that setting and uses Recreate updates to prevent overlapping server pods. HA and vendor-device qualification remain outside this reference.
+Supported topology: one server, one TLS proxy, external Postgres and a vendor HSM. In-progress OIDC login state is stored encrypted in Postgres and needs a `[login_keys]` file (see [operations](../../docs/operations.md#login-state-key)). Existing authenticated sessions remain in Postgres. Shared login state does not make HA supported. Do not scale beyond one server; the Helm chart rejects that setting and uses Recreate updates to prevent overlapping server pods. HA and vendor-device qualification remain outside this reference.
 
 ## Build and qualify
 

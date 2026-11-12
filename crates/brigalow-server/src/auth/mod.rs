@@ -1,4 +1,5 @@
 pub mod gitlab;
+pub mod login_keys;
 pub mod oidc;
 pub mod workload;
 use crate::config::Mode;
@@ -74,11 +75,20 @@ struct CachedKeys {
     expires: Instant,
     value: serde_json::Value,
 }
+/// Pending-login bounds. Rows live in Postgres and are shared by every instance using the
+/// same database; there is no process-local pending state or in-memory fallback.
+pub const PENDING_LIMITS: brigalow_store::login::LoginLimits = brigalow_store::login::LoginLimits {
+    per_org: 1024,
+    global: 4096,
+    lifetime_ms: 300_000,
+    max_seals: login_keys::MAX_SEALS_PER_KEY,
+};
 pub struct Identity {
     pub config: IdentityConfig,
     http: reqwest::Client,
     keys: Mutex<HashMap<(Uuid, String), CachedKeys>>,
-    pending: Mutex<HashMap<String, oidc::Pending>>,
+    login_keys: Option<Arc<login_keys::LoginKeys>>,
+    pending_limits: brigalow_store::login::LoginLimits,
 }
 pub fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
@@ -95,7 +105,20 @@ pub fn now() -> i64 {
         .as_secs() as i64
 }
 impl Identity {
-    pub fn new(config: IdentityConfig, _mode: Mode) -> Result<Arc<Self>, AuthError> {
+    /// Human login requires an operator-provisioned key ring; without one it fails closed.
+    pub fn new(
+        config: IdentityConfig,
+        mode: Mode,
+        login_keys: Option<Arc<login_keys::LoginKeys>>,
+    ) -> Result<Arc<Self>, AuthError> {
+        Self::with_pending_limits(config, mode, login_keys, PENDING_LIMITS)
+    }
+    pub fn with_pending_limits(
+        config: IdentityConfig,
+        _mode: Mode,
+        login_keys: Option<Arc<login_keys::LoginKeys>>,
+        pending_limits: brigalow_store::login::LoginLimits,
+    ) -> Result<Arc<Self>, AuthError> {
         fn valid(url: &str) -> bool {
             url::Url::parse(url).is_ok_and(|u| {
                 u.scheme() == "https"
@@ -112,6 +135,10 @@ impl Identity {
                 .path()
                 != "/"
         {
+            return Err(AuthError);
+        }
+        // Human login needs the shared pending-state key ring; refuse rather than degrade.
+        if login_keys.is_none() && config.authorities.iter().any(|a| a.human.is_some()) {
             return Err(AuthError);
         }
         let mut names = std::collections::HashSet::new();
@@ -174,9 +201,14 @@ impl Identity {
             config,
             http: builder.build().map_err(|_| AuthError)?,
             keys: Mutex::new(HashMap::new()),
-            pending: Mutex::new(HashMap::new()),
+            login_keys,
+            pending_limits,
         }))
     }
+    pub fn login_keys(&self) -> Option<Arc<login_keys::LoginKeys>> {
+        self.login_keys.clone()
+    }
+
     pub fn authority(&self, org: Uuid, name: &str) -> Result<&Authority, AuthError> {
         self.config
             .authorities

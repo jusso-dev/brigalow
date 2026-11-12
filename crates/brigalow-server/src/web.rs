@@ -368,7 +368,9 @@ pub async fn login(
     State(state): State<AppState>,
     Path((org, provider)): Path<(Uuid, String)>,
 ) -> Result<Response> {
-    let login = identity(&state)?.login(org, &provider).await?;
+    let login = identity(&state)?
+        .login(&state.store, org, &provider)
+        .await?;
     let mut response = Redirect::to(&login.url).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -427,7 +429,14 @@ pub async fn complete(
     let browser =
         cookie(&headers, "__Host-brigalow-login").ok_or(WebError(StatusCode::UNAUTHORIZED))?;
     let (principal, expires) = identity(&state)?
-        .complete(org, &provider, &query.state, &query.code, &browser)
+        .complete(
+            &state.store,
+            org,
+            &provider,
+            &query.state,
+            &query.code,
+            &browser,
+        )
         .await?;
     let token = auth::random_secret();
     let csrf = auth::random_secret();

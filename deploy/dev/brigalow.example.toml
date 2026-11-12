@@ -8,3 +8,6 @@ db_user = "brigalow_runtime"
 # db_ca_file = "/path/to/local-test-ca.crt"
 # db_password_file = "/path/to/password"  # alternative: BRIGALOW_DB_PASSWORD
 # hsm_pin_file = "/path/to/pin"          # alternative: BRIGALOW_HSM_PIN
+# Required for human OIDC login: base64 of 32 random bytes in a 0600 file.
+# [login_keys]
+# active = { id = "2026-11", file = "/path/to/login_key" }

@@ -121,6 +121,51 @@ impl CscMockConfig {
     }
 }
 
+/// Paths and IDs only. Each file holds base64 for exactly 32 random bytes, mode 0600.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginKeyFile {
+    pub id: String,
+    pub file: PathBuf,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginKeysConfig {
+    pub active: LoginKeyFile,
+    #[serde(default)]
+    pub previous: Vec<LoginKeyFile>,
+}
+impl LoginKeysConfig {
+    fn load(&self) -> Result<crate::auth::login_keys::LoginKeys, ConfigError> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let read = |key: &LoginKeyFile| -> Result<(String, Zeroizing<Vec<u8>>), ConfigError> {
+            let encoded = Zeroizing::new(secret_file(&key.file)?);
+            let material = Zeroizing::new(
+                STANDARD
+                    .decode(encoded.trim().as_bytes())
+                    .map_err(|_| ConfigError("login state key must be base64 of 32 bytes"))?,
+            );
+            if material.len() != 32 {
+                return Err(ConfigError("login state key must be base64 of 32 bytes"));
+            }
+            Ok((key.id.clone(), material))
+        };
+        let active = read(&self.active)?;
+        let previous = self
+            .previous
+            .iter()
+            .map(read)
+            .collect::<Result<Vec<_>, _>>()?;
+        let previous: Vec<(&str, &[u8])> = previous
+            .iter()
+            .map(|(id, material)| (id.as_str(), material.as_slice()))
+            .collect();
+        crate::auth::login_keys::LoginKeys::new((&active.0, &active.1), &previous).map_err(|_| {
+            ConfigError("invalid login state key ring (IDs must be unique [A-Za-z0-9_-]{1,32}, keys distinct, at most 4 previous)")
+        })
+    }
+}
+
 pub struct Config {
     pub rate_limit: crate::rate_limit::RateLimit,
     pub mode: Mode,
@@ -140,6 +185,7 @@ pub struct Config {
     pub csc_mock: Option<CscMockConfig>,
     pub notifications: Vec<crate::notifications::Config>,
     pub gates: Vec<crate::gates::Config>,
+    login_keys: Option<crate::auth::login_keys::LoginKeys>,
     hsm_pin: Option<Secret>,
 }
 impl fmt::Debug for Config {
@@ -150,6 +196,7 @@ impl fmt::Debug for Config {
             .field("database", &"[REDACTED]")
             .field("db_password", &self.db_password)
             .field("hsm_pin", &self.hsm_pin)
+            .field("login_keys", &self.login_keys)
             .finish()
     }
 }
@@ -179,6 +226,7 @@ struct FileConfig {
     csc_mock: Option<CscMockConfig>,
     notifications: Option<Vec<crate::notifications::Config>>,
     gates: Option<Vec<crate::gates::Config>>,
+    login_keys: Option<LoginKeysConfig>,
 }
 
 pub(crate) fn secret_file(path: &Path) -> Result<String, ConfigError> {
@@ -223,6 +271,10 @@ pub(crate) fn secret_file(path: &Path) -> Result<String, ConfigError> {
 }
 
 impl Config {
+    /// Moves the pending-login key ring to its single owner (the server identity service).
+    pub fn take_login_keys(&mut self) -> Option<crate::auth::login_keys::LoginKeys> {
+        self.login_keys.take()
+    }
     /// Server startup only: owner tools intentionally do not load a signing backend.
     pub fn require_server(&self, identity_present: bool) -> Result<(), ConfigError> {
         if self.mode == Mode::Production {
@@ -332,6 +384,11 @@ impl Config {
             csc_mock: file.csc_mock,
             notifications: file.notifications.unwrap_or_default(),
             gates: file.gates.unwrap_or_default(),
+            login_keys: file
+                .login_keys
+                .as_ref()
+                .map(LoginKeysConfig::load)
+                .transpose()?,
             mode,
             bind,
             db_host: env("BRIGALOW_DB_HOST")?
@@ -492,6 +549,87 @@ mod tests {
         )
         .unwrap();
         assert!(config.key_backend().is_err());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn login_key_ring_files_are_private_exact_and_redacted() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use rand::RngCore;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let password = uuid::Uuid::new_v4().to_string();
+        let write = |name: &str, bytes: usize, mode: u32| {
+            let mut material = vec![0u8; bytes];
+            rand::rngs::OsRng.fill_bytes(&mut material);
+            let encoded = STANDARD.encode(&material);
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("{encoded}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            (path, encoded)
+        };
+        let ring = |active: &std::path::Path, previous: &[(&str, &std::path::Path)]| {
+            let mut text = format!(
+                "[login_keys]\nactive = {{ id = 'k2', file = '{}' }}\nprevious = [",
+                active.display()
+            );
+            for (id, path) in previous {
+                text += &format!("{{ id = '{id}', file = '{}' }},", path.display());
+            }
+            text + "]\n"
+        };
+        let (active, active_value) = write("active", 32, 0o600);
+        let (old, old_value) = write("old", 32, 0o600);
+        let mut config = load(
+            &ring(&active, &[("k1", &old)]),
+            &[("BRIGALOW_DB_PASSWORD", &password)],
+        )
+        .unwrap();
+        let debug = format!("{config:?}");
+        for secret in [&active_value, &old_value, &password] {
+            assert!(!debug.contains(secret.as_str()));
+        }
+        let keys = config.take_login_keys().unwrap();
+        assert_eq!(keys.active_id(), "k2");
+        assert!(config.take_login_keys().is_none());
+        assert!(load("", &[("BRIGALOW_DB_PASSWORD", &password)])
+            .unwrap()
+            .take_login_keys()
+            .is_none());
+        let reject = |text: String| {
+            let error = load(&text, &[("BRIGALOW_DB_PASSWORD", &password)]).unwrap_err();
+            let shown = format!("{error} {error:?}");
+            assert!(!shown.contains(&active_value) && !shown.contains(&old_value));
+        };
+        let (short, _) = write("short", 31, 0o600);
+        let (long, _) = write("long", 33, 0o600);
+        let (public, _) = write("public", 32, 0o644);
+        let link = dir.path().join("link");
+        symlink(&active, &link).unwrap();
+        let garbage = dir.path().join("garbage");
+        std::fs::write(&garbage, "not base64!").unwrap();
+        std::fs::set_permissions(&garbage, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for path in [
+            &short,
+            &long,
+            &public,
+            &link,
+            &garbage,
+            &dir.path().join("missing"),
+        ] {
+            reject(ring(path, &[]));
+            reject(ring(&active, &[("k1", path)]));
+        }
+        // Duplicate IDs or reused material are ambiguous; unknown fields are rejected.
+        reject(ring(&active, &[("k2", &old)]));
+        reject(ring(&active, &[("k1", &active)]));
+        reject(ring(&active, &[("bad id", &old)]));
+        reject(format!(
+            "[login_keys]\nactive = {{ id = 'k2', file = '{}', value = 'x' }}\n",
+            active.display()
+        ));
+        reject(format!(
+            "[login_keys]\nactive = {{ id = 'k2', value = '{active_value}' }}\n"
+        ));
     }
     #[test]
     #[cfg(unix)]

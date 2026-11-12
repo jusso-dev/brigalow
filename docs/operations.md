@@ -87,7 +87,23 @@ Recovery sequence:
 
 Use the [production reference](../deploy/production/README.md) for the container image, TLS Compose configuration, Helm chart, separate migration command and organisation bootstrap. Production startup requires PKCS#11, configured identity and the exact applied migration set/checksums. The runtime cannot apply migrations or rewrite their history. `brigalow-admin` is a separate owner-only process; its credentials must never reach the server.
 
-Only one server replica is supported. Pending OIDC state is process-local, so restart invalidates unfinished logins; authenticated sessions and signing intents remain in Postgres. Helm rejects additional replicas. A shared database alone does not provide login coordination or qualify vendor HSM failover. There is no exactly-once hardware-signature guarantee across crashes.
+Only one server replica is supported. Pending OIDC logins are now stored in Postgres (see below), so a restart within five minutes no longer invalidates unfinished logins. This does not enable HA: Helm still rejects additional replicas and uses Recreate updates. Multi-process signing, gate, cap and expiry races (AT-HA-02), HSM session concurrency and the recovery/fencing blockers are not implemented or qualified. A shared database does not qualify vendor HSM failover. There is no exactly-once hardware-signature guarantee across crashes.
+
+## Login state key
+
+Human OIDC login requires a dedicated 256-bit key protecting pending-login PKCE verifiers and nonces in Postgres ([ADR 0004](decisions/0004-shared-login-state.md)). The server refuses to start with a human authority and no key ring. Keep this key separate from HSM PINs, signing keys and DB credentials. Never put it in TOML, Helm values, logs or fixtures.
+
+Provision it as a private file containing base64 of 32 random bytes, for example `openssl rand -base64 32 > login_key && chmod 0600 login_key`, run inside your secret-management process. Reference it by path:
+
+```toml
+[login_keys]
+active = { id = "2026-11", file = "/run/brigalow/login_key" }
+previous = [{ id = "2026-08", file = "/run/brigalow/login_key_previous" }]
+```
+
+IDs are 1–32 characters of `[A-Za-z0-9_-]`, unique, with distinct key material and at most four previous entries. Files must be regular, non-symlink, mode 0600 and at most 4096 bytes. In Helm, add the file to the runtime Secret; the init container copies it to a private 0600 file.
+
+Rotation: generate a new key with a new ID, make it `active` and move the old one to `previous`, then do a controlled restart. Keep the old entry for at least the five-minute pending lifetime plus restart margin, then remove it. Logins sealed with a removed or unknown key ID are rejected, and the user signs in again. After a suspected key compromise, remove the key immediately: pending logins sealed with it are invalidated, and existing sessions follow their normal expiry and revocation. Each key ID allows 2^31 committed logins; past that, logins fail closed until you rotate. Reusing an ID with new material is not a rotation, because the usage counter is per ID. Back up the key through your secret manager. A database backup alone cannot open pending rows, which expire within five minutes anyway.
 
 `/livez` checks process liveness; `/healthz` also checks Postgres and the logged-in HSM session in production. An unavailable/busy HSM makes readiness fail without signing. Vendor transport timeouts remain operator-owned because native calls cannot be forcibly cancelled safely.
 

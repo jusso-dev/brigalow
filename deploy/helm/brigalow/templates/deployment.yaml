@@ -1,4 +1,4 @@
-{{- if ne (int .Values.replicas) 1 -}}{{ fail "only one replica is supported; OIDC login state is process-local" }}{{- end -}}
+{{- if ne (int .Values.replicas) 1 -}}{{ fail "only one replica is supported; multi-instance signing/HSM concurrency is not qualified" }}{{- end -}}
 {{- $image := required "image must be set to a reviewed immutable digest" .Values.image -}}
 {{- if not (regexMatch "^.+@sha256:[a-f0-9]{64}$" $image) -}}{{ fail "image must use a sha256 digest" }}{{- end -}}
 {{- $secret := required "existingSecret is required; never put secret values in Helm values" .Values.existingSecret -}}

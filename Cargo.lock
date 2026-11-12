@@ -352,6 +352,7 @@ name = "brigalow-server"
 version = "0.0.1"
 dependencies = [
  "askama",
+ "aws-lc-rs",
  "axum",
  "base64 0.22.1",
  "brigalow-core",

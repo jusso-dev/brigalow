@@ -70,6 +70,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| {
             include_str!("../migrations/0008_audit_checkpoints.sql").into_sql_str(),
             false,
         ),
+        Migration::new(
+            10,
+            "pending logins".into(),
+            MigrationType::Simple,
+            include_str!("../migrations/0010_pending_logins.sql").into_sql_str(),
+            false,
+        ),
     ])
 });
 

@@ -1,4 +1,4 @@
-# Single-instance reference. Review image digest, external DB/HSM/IdP and TLS before use.
+# Single-instance reference. Invoke through scripts/production.py to enforce image/file guards.
 services:
   server:
     image: ${BRIGALOW_IMAGE:?set an operator-reviewed image at sha256 digest}

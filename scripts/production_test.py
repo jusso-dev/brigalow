@@ -45,7 +45,7 @@ def qualify(compose, env, root, directory):
     keeper = project+"-prod-config-keeper"
     source = Path(directory)/"production-image"
     app, tls = source/"app", source/"tls"
-    app.mkdir(parents=True); tls.mkdir()
+    app.mkdir(parents=True, mode=0o700); tls.mkdir(mode=0o700)
     protected = [secrets.token_hex(24), secrets.token_hex(24), secrets.token_hex(24)]
     (app/"hsm_pin").write_text(protected[0]); (app/"hsm_so_pin").write_text(protected[1])
     (app/"db_password").write_bytes((Path(directory)/"app_password").read_bytes())
@@ -70,7 +70,7 @@ hsm_pin_file = "/run/brigalow/hsm_pin"
     restricted = ["--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=128", "--memory=1g", "--cpus=2"]
     try:
         validation_env = dict(env, BRIGALOW_IMAGE="brigalow@sha256:"+"1"*64, BRIGALOW_CONFIG_DIR=str(app), BRIGALOW_TLS_DIR=str(tls))
-        subprocess.run(docker+["compose", "-f", "deploy/production/compose.yml", "config", "--quiet"], cwd=root, env=validation_env, check=True)
+        subprocess.run(["python3", "scripts/production.py", "--context", docker[2], "config", "--quiet"], cwd=root, env=validation_env, check=True)
         call("build", "--target", "production", "-t", runtime, ".")
         call("build", "--target", "test-runtime", "-t", test_image, ".")
         call("pull", PROXY)

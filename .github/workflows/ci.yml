@@ -23,6 +23,8 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: GitHub OIDC wrapper tests
         run: python3 actions/sign/test_sign.py
+      - name: Production input guards
+        run: python3 scripts/test_production.py
       - name: Release packaging tests
         run: python3 scripts/test_release.py
       - name: Test

@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
         # Verify across the container/host ownership boundary before cleanup.
         for public_output in ["manifest.sig", "lab-public.pem"]:
             assert (release/public_output).stat().st_mode & 0o444 == 0o444, "public release output must be readable by the host"
-        run(["python3", "scripts/verify_release.py", str(release), "--public-key", str(release/"lab-public.pem")])
+        run(["python3", "scripts/verify_release.py", str(release), "--mode", "lab", "--public-key", str(release/"lab-public.pem")])
         if args.tools_only:
             raise SystemExit(0)
         qualify(compose, env, root, directory)

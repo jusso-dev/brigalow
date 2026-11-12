@@ -86,8 +86,8 @@ run("/work/target/debug/brig", "sign", "--server", config["server"], "--org", co
 # verification/upload runs as the unprivileged CI user. Never apply to key files.
 for public_output in ["manifest.sig", "lab-public.pem"]:
     (release/public_output).chmod(0o644)
-run("python3", "/work/scripts/verify_release.py", str(release), "--public-key", str(release/"lab-public.pem"))
+run("python3", "/work/scripts/verify_release.py", str(release), "--mode", "lab", "--public-key", str(release/"lab-public.pem"))
 manifest = (release/"manifest.json").read_bytes()
 (release/"manifest.json").write_bytes(manifest+b" ")
-run("python3", "/work/scripts/verify_release.py", str(release), "--public-key", str(release/"lab-public.pem"), ok=False)
+run("python3", "/work/scripts/verify_release.py", str(release), "--mode", "lab", "--public-key", str(release/"lab-public.pem"), ok=False)
 (release/"manifest.json").write_bytes(manifest)

@@ -119,4 +119,39 @@ The manual `lab-signed release bundle` workflow builds Linux binaries/provider w
 
 The generated key is ephemeral and the manifest explicitly says `lab`. Its included public key enables integrity checks but does not independently authenticate the publisher; consumers must establish key/source trust themselves. This workflow makes no release-key custody, public-trust or certification claim. A production release process must use your reviewed HSM/policy/trust configuration under separate operational authorisation.
 
-`python3 scripts/test_release.py` tests archive/SBOM packaging and payload tamper rejection with generated fixture binaries. The full Compose tool test separately verifies signing through the real local control plane and rejects a modified manifest. `scripts/verify_release.py <directory> --public-key <independently-trusted-PEM>` verifies signature and all listed payload digests.
+`python3 scripts/test_release.py` tests archive/SBOM packaging and payload tamper rejection with generated fixture binaries. The full Compose tool test separately verifies signing through the real local control plane and rejects a modified manifest. `scripts/verify_release.py <directory> --mode lab --public-key <independently-trusted-PEM>` verifies signature and all listed payload digests. The mode is required; a lab bundle never passes operator mode.
+
+## Operator-signed release bundles
+
+`scripts/operator_release.py` is a local operator command, separate from the lab workflow. It creates no GitHub release, publishes nothing to a network, contacts only the configured Brigalow server and never retries. This repository has not signed or published any operator release, and running the command does not qualify a production HSM.
+
+Before use, the operator separately provisions:
+
+- a P-256 or RSA-3072 `release` key generated in their PKCS#11 device, with a certificate chain to a configured private or external-CA anchor and (for `offline` keys) a release window;
+- a `release`-purpose policy with the approvals, gates and claims they require, and a scoped submitter credential in `BRIGALOW_TOKEN`;
+- the release public key, exported from Brigalow and distributed to consumers through an independently trusted channel. Record its SPKI SHA-256 fingerprint for `--expected-key-sha256`.
+
+```sh
+python3 scripts/operator_release.py --binaries target/release --output releases/brigalow-<commit> \
+  --public-key <pinned-release-public.pem> --expected-key-sha256 <reviewed-fingerprint> \
+  --expected-revision <full-commit> --server https://<brigalow> --org <UUID> --project <UUID> \
+  --policy <release-policy> --ca-file <server-ca.pem>
+```
+
+The command requires a clean git checkout. It packages the archive and SBOM into a private staging directory beside `--output` and writes a frozen version 2 manifest: `trust: "operator"`, `provenance: "self-hosted"`, the full source commit, `digest_algorithm: "sha256"` and exactly two artifacts (`brigalow-linux.tar.gz`, `sbom.cdx.json`) with SHA-256 hashes. The manifest is canonical JSON; those exact bytes are hashed locally by one `brig sign --format raw` call and the server receives only the digest. The command prints the request ID, waits for approvals, gates and windows as normal, verifies the signature and every payload against the pinned key, then publishes the complete directory with an atomic no-replace rename (`renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np(RENAME_EXCL)` on macOS). Other platforms fail closed.
+
+Failure handling:
+
+- Existing output is refused before any request is submitted and is never modified. A target created during signing makes publication fail and stays untouched.
+- Denial, rejection, gate failure, expiry, a signing failure or `--timeout` exits non-zero, removes staging and prints the request ID. A timeout means the outcome is uncertain: query that request ID on the server. Do not rerun the command to "retry"; a new run creates a new request and may consume more release-window capacity.
+- Timestamp and attestation outputs are not yet part of the version 2 bundle. A policy that returns them makes the command fail rather than drop evidence silently. Use `timestamp = "disabled"` until a later manifest version binds timestamp tokens.
+- If the final directory sync fails after the rename, the command exits non-zero and says the bundle needs verification before use.
+
+Consumers verify with the separately pinned key, never a key shipped beside the bundle:
+
+```sh
+python3 scripts/verify_release.py <bundle> --mode operator --public-key <pinned.pem> \
+  --expected-key-sha256 <fingerprint> --expected-revision <full-commit>
+```
+
+Operator mode rejects keys inside the bundle, symlinked or non-regular entries, missing or extra files, duplicate JSON keys, non-canonical encoding, unknown fields, versions, trust labels, provenance or algorithms, non-basename names and manifests over 64 KiB. OpenSSL (`dgst -sha256 -verify`) checks the signature over the exact manifest bytes before the manifest is parsed. A pass reports cryptographic validity and the declared `operator` origin only. It is not a public-trust, CA or platform-trust decision, and it cannot show that a newer release was withheld. Key rotation, revocation and the trusted distribution channel for the pinned key remain operator responsibilities.

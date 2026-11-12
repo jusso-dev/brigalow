@@ -4528,3 +4528,6 @@ async fn at_ha_01_shared_login_state_across_instances() {
     store_a.close().await;
     store_b.close().await;
 }
+#[cfg(feature = "tool-tests")]
+#[path = "support/operator_release.rs"]
+mod operator_release;

@@ -2,6 +2,8 @@
 
 These Bicep files describe one Brigalow server on one Azure VM, signing through an Azure Artifact Signing certificate profile. They were validated offline only (`az bicep build`, `az bicep lint`, `python3 deploy/azure/test_azure.py`). Nothing in this repository has deployed them, created an account or made a real signing request. Deploying creates billable resources in your subscription. Review the template and costs first.
 
+For a first real deployment, follow the step-by-step [operator runbook](../../docs/runbooks/azure-first-deployment.md).
+
 Supported topology: one VM, one server process, one TLS proxy. There is no scale set and no HA. The backend contract and its limits are in [Azure Artifact Signing backend](../../docs/integrations/azure-artifact-signing.md). Brigalow makes no public-trust, platform-acceptance or compliance claim for anything this produces.
 
 ## What it creates

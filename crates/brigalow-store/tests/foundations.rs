@@ -42,7 +42,7 @@ async fn at_ten_01_store_isolation_and_atomic_audit() {
     .await
     .unwrap();
     if !exists {
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .execute(&admin)
             .await
             .map_err(|_| "cannot provision test login")
@@ -121,10 +121,12 @@ async fn at_ten_01_store_isolation_and_atomic_audit() {
         "sign_requests",
         "audit_entries",
     ] {
-        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM brigalow.{table}"))
-            .fetch_one(&app)
-            .await
-            .unwrap();
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM brigalow.{table}"
+        )))
+        .fetch_one(&app)
+        .await
+        .unwrap();
         assert_eq!(count, 0);
     }
     let mut tx = app.begin().await.unwrap();

@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/brigalow-pkcs11", "crates/brigalow-core", "crates/brigalow-server", "crates/brigalow-store", "crates/brigalow-crypto", "crates/brig"]
+members = ["crates/brigalow-postgres", "crates/brigalow-pkcs11", "crates/brigalow-core", "crates/brigalow-server", "crates/brigalow-store", "crates/brigalow-crypto", "crates/brig"]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/jusso-dev/brigalow"
-rust-version = "1.89"
+rust-version = "1.94"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -16,7 +16,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "json", "migrate", "macros"] }
+sqlx = { package = "brigalow-postgres", path = "crates/brigalow-postgres" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

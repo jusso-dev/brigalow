@@ -1,11 +1,11 @@
 //! In-memory test-only keys. No persistence, export, production load or release purpose.
 use crate::*;
-use p256_signing::{
+use ed25519_dalek::pkcs8::EncodePublicKey as _;
+use p256::{
     ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey},
     elliptic_curve::Generate,
 };
-use rsa::pkcs8::EncodePublicKey as _;
-use rsa_signing::{pkcs8::EncodePublicKey as _, PrivateKey};
+use rsa::{pkcs8::EncodePublicKey as _, PrivateKey};
 use signature::Signer;
 use std::{collections::HashMap, sync::Mutex};
 enum Material {
@@ -100,7 +100,7 @@ impl KeyBackend for Software {
         check_digest(digest)?;
         self.with(key, |s| match &s.material {
             Material::Rsa(k) => k
-                .pkcs1v15_sign_prehash::<rsa_signing::sha2::Sha256>(digest)
+                .pkcs1v15_sign_prehash::<rsa::sha2::Sha256>(digest)
                 .map_err(|_| Error::Backend),
             Material::Ec(k) => {
                 let signature: Signature = k.sign_prehash(digest).map_err(|_| Error::Backend)?;

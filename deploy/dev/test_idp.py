@@ -10,8 +10,8 @@ codes = {}
 lock = threading.Lock()
 def b64(value): return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
 def integer(value): return b64(value.to_bytes((value.bit_length()+7)//8,"big"))
-def token(claims, bad=False, alg="RS256"):
-    header={"alg":alg,"kid":"test","typ":"JWT"}
+def token(claims, bad=False, alg="RS256", extra_header=None):
+    header={"alg":alg,"kid":"test","typ":"JWT",**(extra_header or {})}
     message=b64(json.dumps(header).encode())+"."+b64(json.dumps(claims).encode())
     signature=(bad_key if bad else key).sign(message.encode(),padding.PKCS1v15(),hashes.SHA256()) if alg!="none" else b""
     return message+"."+b64(signature)
@@ -25,9 +25,13 @@ class Handler(BaseHTTPRequestHandler):
     def issuer(self):return "https://"+self.headers["Host"]
     def do_GET(self):
         url=urlparse(self.path)
-        if url.path=="/jwks":
+        if url.path=="/jwks" or url.path.startswith("/jwks/"):
             public=key.public_key().public_numbers()
-            return self.reply(200,{"keys":[{"kty":"RSA","kid":"test","alg":"RS256","use":"sig","n":integer(public.n),"e":integer(public.e)}]})
+            jwk={"kty":"RSA","kid":"test","alg":"RS256","use":"sig","n":integer(public.n),"e":integer(public.e)}
+            if url.path.endswith("bad-jwk-use"):jwk["use"]="enc"
+            if url.path.endswith("bad-jwk-alg"):jwk["alg"]="RS512"
+            if url.path.endswith("bad-jwk-ops"):jwk["key_ops"]=["encrypt"]
+            return self.reply(200,{"keys":[jwk,jwk] if url.path.endswith("duplicate-kid") else [jwk]})
         if url.path=="/authorize":
             q={k:v[0] for k,v in parse_qs(url.query).items()}
             required=("state","nonce","client_id","redirect_uri","code_challenge")
@@ -57,7 +61,15 @@ class Handler(BaseHTTPRequestHandler):
             if pending["client_id"]=="wrong-audience":claims["aud"]="unrelated"
             if pending["client_id"]=="expired":claims["exp"]=int(time.time())-1
             if pending["client_id"]=="wrong-nonce":claims["nonce"]="unrelated"
-            return self.reply(200,{"id_token":token(claims),"access_token":secrets.token_urlsafe(32),"token_type":"Bearer"})
+            client=pending["client_id"]
+            if client=="missing-nonce":claims.pop("nonce")
+            if client=="missing-iat":claims.pop("iat")
+            if client=="future-iat":claims["iat"]=int(time.time())+120
+            if client=="negative-iat":claims["iat"]=-9223372036854775808
+            if client=="extra-audience":claims["aud"]=[client,"foreign-client"]
+            if client=="wrong-azp":claims["azp"]="foreign-client"
+            headers={"bad-typ":{"typ":"other"},"bad-cty":{"cty":"JWT"},"bad-crit":{"crit":["unknown"]}}.get(client)
+            return self.reply(200,{"id_token":token(claims,extra_header=headers),"access_token":secrets.token_urlsafe(32),"token_type":"Bearer"})
         return self.reply(404,{})
 server=ThreadingHTTPServer(("0.0.0.0",8443),Handler)
 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

@@ -19,6 +19,7 @@ fn at_ops_01_startup_error_redacts_environment_secrets_and_config() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_brigalow-server"))
         .env_clear()
         .env("BRIGALOW_CONFIG", config.path())
+        .env("BRIGALOW_MODE", "lab")
         .env("BRIGALOW_DB_HOST", "127.0.0.1")
         .env("BRIGALOW_DB_PORT", port.to_string())
         .env("BRIGALOW_DB_PASSWORD", &password)
@@ -63,4 +64,29 @@ fn at_key_01_production_software_refused_before_database_connection() {
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("software backend requires lab mode"));
     assert!(!error.contains("database startup failed"));
+}
+
+#[test]
+fn at_ops_04_production_server_requires_backend_and_identity() {
+    for (backend, expected) in [
+        ("disabled", "production server requires PKCS#11 backend"),
+        (
+            "pkcs11",
+            "production server requires identity configuration",
+        ),
+    ] {
+        let password = uuid::Uuid::new_v4().to_string();
+        let output = Command::new(env!("CARGO_BIN_EXE_brigalow-server"))
+            .env_clear()
+            .env("BRIGALOW_MODE", "production")
+            .env("BRIGALOW_BACKEND", backend)
+            .env("BRIGALOW_DB_PASSWORD", &password)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(expected));
+        assert!(!error.contains(&password));
+        assert!(!error.contains("database startup failed"));
+    }
 }

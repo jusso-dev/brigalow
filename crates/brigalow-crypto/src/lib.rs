@@ -31,6 +31,11 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 pub trait KeyBackend: Send + Sync {
+    /// Readiness is explicit for production backends; no signature or key mutation.
+    fn healthy(&self) -> bool {
+        false
+    }
+
     /// Explicit pre-provisioned remote reference, scoped by operator configuration.
     fn remote_key(&self, _id: Uuid, _org: Uuid, _project: Uuid) -> Result<Key> {
         Err(Error::Unavailable)

@@ -8,6 +8,7 @@ use sqlx::{
 use std::time::Duration;
 use uuid::Uuid;
 
+pub mod admin;
 pub mod approvals;
 mod checkpoints;
 pub mod identity;
@@ -16,7 +17,8 @@ pub mod private_ca;
 mod rate_limit;
 pub mod signing;
 
-pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+mod migrations;
+pub use migrations::MIGRATOR;
 
 // Do not expose driver errors: Postgres errors may contain submitted data or credentials.
 #[derive(Debug, thiserror::Error)]
@@ -85,9 +87,11 @@ impl Store {
             return Err(Error::UnsafeRole);
         }
         // Refuse missing/old schema; migrations never run with application credentials.
-        let _: i64 = sqlx::query_scalar("SELECT count(*) FROM brigalow.audit_entries")
-            .fetch_one(&pool)
-            .await?;
+        let mut connection = pool.acquire().await?;
+        if !schema_current(&mut connection).await? {
+            return Err(Error::Database);
+        }
+        drop(connection);
         Ok(Self { pool })
     }
     /// Only call with an organisation established by authenticated server-side identity.
@@ -225,3 +229,21 @@ impl Tenant {
 }
 
 mod gates;
+
+/// Read-only schema gate shared by runtime startup and operator validation.
+pub async fn schema_current(connection: &mut sqlx::PgConnection) -> Result<bool, Error> {
+    let applied: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
+        "SELECT version, checksum, success FROM public._sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(connection)
+    .await?;
+    Ok(applied.len() == MIGRATOR.iter().count()
+        && applied
+            .iter()
+            .zip(MIGRATOR.iter())
+            .all(|((version, checksum, success), expected)| {
+                *success
+                    && *version == expected.version
+                    && checksum.as_slice() == expected.checksum.as_ref()
+            }))
+}

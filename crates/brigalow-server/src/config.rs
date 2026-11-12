@@ -223,6 +223,20 @@ pub(crate) fn secret_file(path: &Path) -> Result<String, ConfigError> {
 }
 
 impl Config {
+    /// Server startup only: owner tools intentionally do not load a signing backend.
+    pub fn require_server(&self, identity_present: bool) -> Result<(), ConfigError> {
+        if self.mode == Mode::Production {
+            if self.backend != Backend::Pkcs11 {
+                return Err(ConfigError("production server requires PKCS#11 backend"));
+            }
+            if !identity_present {
+                return Err(ConfigError(
+                    "production server requires identity configuration",
+                ));
+            }
+        }
+        Ok(())
+    }
     pub fn load() -> Result<Self, ConfigError> {
         let lookup = |key: &str| match std::env::var(key) {
             Ok(value) => Ok(Some(value)),

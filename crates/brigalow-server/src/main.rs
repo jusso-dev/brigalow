@@ -12,6 +12,32 @@ async fn run() -> Result<(), &'static str> {
         tracing::error!(%error, "configuration rejected");
         "invalid configuration"
     })?;
+    config
+        .require_server(std::env::var_os("BRIGALOW_IDENTITY_FILE").is_some())
+        .map_err(|error| {
+            tracing::error!(%error, "server configuration rejected");
+            "invalid server configuration"
+        })?;
+    let identity = match std::env::var("BRIGALOW_IDENTITY_FILE") {
+        Ok(path) => {
+            let bytes = std::fs::read(path).map_err(|_| "cannot read identity configuration")?;
+            let settings: IdentityConfig =
+                serde_json::from_slice(&bytes).map_err(|_| "invalid identity configuration")?;
+            Some(
+                Identity::new(settings, config.mode)
+                    .map_err(|_| "invalid identity configuration")?,
+            )
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err("invalid identity configuration path"),
+    };
+    if config.mode == Mode::Production
+        && identity
+            .as_ref()
+            .is_none_or(|id| id.config.authorities.is_empty())
+    {
+        return Err("production server requires at least one identity authority");
+    }
     let config = std::sync::Arc::new(config);
     let backend_config = config.clone();
     let backend = tokio::task::spawn_blocking(move || backend_config.key_backend())
@@ -77,19 +103,6 @@ async fn run() -> Result<(), &'static str> {
         tracing::warn!("LAB MODE: test use only; release signing unavailable");
     }
     tracing::info!(address = %listener.local_addr().map_err(|_| "cannot inspect listener")?, mode = ?config.mode, "server listening");
-    let identity = match std::env::var("BRIGALOW_IDENTITY_FILE") {
-        Ok(path) => {
-            let bytes = std::fs::read(path).map_err(|_| "cannot read identity configuration")?;
-            let settings: IdentityConfig =
-                serde_json::from_slice(&bytes).map_err(|_| "invalid identity configuration")?;
-            Some(
-                Identity::new(settings, config.mode)
-                    .map_err(|_| "invalid identity configuration")?,
-            )
-        }
-        Err(std::env::VarError::NotPresent) => None,
-        Err(_) => return Err("invalid identity configuration path"),
-    };
     let expiry_task = identity.as_ref().map(|identity| {
         let orgs = identity
             .config

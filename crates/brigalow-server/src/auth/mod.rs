@@ -208,13 +208,42 @@ impl Identity {
             return Err(AuthError);
         }
         let header = decode_header(token).map_err(|_| AuthError)?;
-        if header.alg != Algorithm::RS256 {
+        if header.alg != Algorithm::RS256
+            || header.crit.is_some()
+            || header.cty.is_some()
+            || header.typ.as_deref().is_some_and(|typ| {
+                !typ.eq_ignore_ascii_case("JWT") && !typ.eq_ignore_ascii_case("application/jwt")
+            })
+        {
             return Err(AuthError);
         }
         let keys = self.jwks(a).await?;
         let set: JwkSet = serde_json::from_value(keys.clone()).map_err(|_| AuthError)?;
         let kid = header.kid.ok_or(AuthError)?;
-        let key = set.find(&kid).ok_or(AuthError)?;
+        let mut matching = set
+            .keys
+            .iter()
+            .filter(|key| key.common.key_id.as_deref() == Some(&kid));
+        let key = matching.next().ok_or(AuthError)?;
+        use jsonwebtoken::jwk::{KeyAlgorithm, KeyOperations, PublicKeyUse};
+        if matching.next().is_some()
+            || key
+                .common
+                .public_key_use
+                .as_ref()
+                .is_some_and(|usage| *usage != PublicKeyUse::Signature)
+            || key
+                .common
+                .key_algorithm
+                .is_some_and(|alg| alg != KeyAlgorithm::RS256)
+            || key
+                .common
+                .key_operations
+                .as_ref()
+                .is_some_and(|ops| !ops.contains(&KeyOperations::Verify))
+        {
+            return Err(AuthError);
+        }
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[&a.issuer]);
         validation.set_audience(&[audience]);

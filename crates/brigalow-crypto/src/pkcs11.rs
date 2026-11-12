@@ -10,7 +10,7 @@ use der::{
     asn1::{ObjectIdentifier, OctetString},
     Decode,
 };
-use rsa::{pkcs8::EncodePublicKey, BigUint, RsaPublicKey};
+use rsa::{pkcs8::EncodePublicKey, BoxedUint, PublicKey};
 use std::{path::Path, sync::Mutex};
 pub struct Hsm {
     session: Mutex<Session>,
@@ -72,6 +72,16 @@ impl Hsm {
     }
 }
 impl KeyBackend for Hsm {
+    fn healthy(&self) -> bool {
+        // A stuck vendor call can occupy at most one health worker; never queue on the lock.
+        self.session.try_lock().is_ok_and(|session| {
+            session.get_session_info().is_ok_and(|info| {
+                info.session_state() == cryptoki::session::SessionState::RwUser
+                    && info.device_error() == 0
+            })
+        })
+    }
+
     fn generate(&self, algorithm: Algorithm, purpose: Purpose) -> Result<Key> {
         if algorithm == Algorithm::Ed25519 {
             return Err(Error::Algorithm);
@@ -161,11 +171,16 @@ impl KeyBackend for Hsm {
                         }
                     })
                     .ok_or(Error::Backend)?;
-                RsaPublicKey::new(BigUint::from_bytes_be(n), BigUint::from_bytes_be(e))
-                    .map_err(|_| Error::Backend)?
-                    .to_public_key_der()
-                    .map(|d| d.as_bytes().to_vec())
-                    .map_err(|_| Error::Backend)
+                PublicKey::new(
+                    BoxedUint::from_be_slice(n, (n.len() * 8) as u32)
+                        .map_err(|_| Error::Backend)?,
+                    BoxedUint::from_be_slice(e, (e.len() * 8) as u32)
+                        .map_err(|_| Error::Backend)?,
+                )
+                .map_err(|_| Error::Backend)?
+                .to_public_key_der()
+                .map(|d| d.as_bytes().to_vec())
+                .map_err(|_| Error::Backend)
             }
             Algorithm::P256 => {
                 let a = s

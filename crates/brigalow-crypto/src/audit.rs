@@ -1,7 +1,8 @@
 use crate::{Error, Key, KeyBackend, Result};
 use brigalow_core::audit::{Checkpoint, SignedCheckpoint};
+use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use rsa::pkcs8::DecodePublicKey;
-use signature::Verifier;
+use rsa::signature::Verifier;
 /// Vetted signature verification, shared by checkpoint and CSR consumers.
 pub fn verify_message(
     algorithm: crate::Algorithm,
@@ -13,11 +14,11 @@ pub fn verify_message(
         crate::Algorithm::Rsa3072 => {
             use rsa::traits::PublicKeyParts;
             let key =
-                rsa::RsaPublicKey::from_public_key_der(public).map_err(|_| Error::Certificate)?;
-            if key.n().bits() != 3072 {
+                rsa::PublicKey::from_public_key_der(public).map_err(|_| Error::Certificate)?;
+            if key.n().bit_width() != 3072 {
                 return Err(Error::Algorithm);
             }
-            rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(key)
+            rsa::pkcs1v15::VerifyingKey::<rsa::sha2::Sha256>::new(key)
                 .verify(
                     message,
                     &rsa::pkcs1v15::Signature::try_from(sig).map_err(|_| Error::Certificate)?,

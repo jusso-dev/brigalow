@@ -6,6 +6,7 @@ use der::{
     asn1::{BitString, OctetString, Utf8StringRef},
     Decode, Encode,
 };
+use ed25519_dalek::pkcs8::DecodePublicKey as _;
 use rsa::pkcs8::DecodePublicKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -277,7 +278,7 @@ impl<'a> Issuer<'a> {
 
 pub fn validate_public_key(public: &[u8]) -> Result<Algorithm> {
     use rsa::traits::PublicKeyParts;
-    if rsa::RsaPublicKey::from_public_key_der(public).is_ok_and(|k| k.n().bits() == 3072) {
+    if rsa::PublicKey::from_public_key_der(public).is_ok_and(|k| k.n().bit_width() == 3072) {
         return Ok(Algorithm::Rsa3072);
     }
     if p256::ecdsa::VerifyingKey::from_public_key_der(public).is_ok() {

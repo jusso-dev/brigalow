@@ -248,10 +248,10 @@ impl KeyBackend for CscMock {
         let signature = STANDARD
             .decode(signatures[0].as_str().ok_or(Error::Backend)?)
             .map_err(|_| Error::Backend)?;
-        let public = rsa::RsaPublicKey::from_public_key_der(&record.public)
-            .map_err(|_| Error::Certificate)?;
+        let public =
+            rsa::PublicKey::from_public_key_der(&record.public).map_err(|_| Error::Certificate)?;
         public
-            .verify(rsa::Pkcs1v15Sign::new::<sha2::Sha256>(), digest, &signature)
+            .pkcs1v15_verify_prehash::<rsa::sha2::Sha256>(digest, &signature)
             .map_err(|_| Error::Backend)?;
         Ok(signature)
     }

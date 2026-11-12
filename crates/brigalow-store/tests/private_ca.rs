@@ -41,7 +41,7 @@ async fn ca_ledger_separates_roles_reserves_once_and_rejects_stale_crls() {
     .fetch_one(&admin)
     .await
     .unwrap();
-    sqlx::query(&sql)
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .execute(&admin)
         .await
         .map_err(|_| "cannot create ephemeral CA login")
@@ -68,10 +68,12 @@ async fn ca_ledger_separates_roles_reserves_once_and_rejects_stale_crls() {
         .await
         .unwrap();
     for table in ["ca_profiles", "ca_leaves", "ca_crls"] {
-        assert!(sqlx::query(&format!("SELECT * FROM brigalow.{table}"))
-            .fetch_all(&app)
-            .await
-            .is_err());
+        assert!(sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT * FROM brigalow.{table}"
+        )))
+        .fetch_all(&app)
+        .await
+        .is_err());
     }
     let issuer = Uuid::new_v4();
     let profile = Uuid::new_v4();

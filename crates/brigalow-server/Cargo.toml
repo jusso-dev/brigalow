@@ -37,9 +37,9 @@ base64 = "0.22"
 rand = "0.8"
 subtle = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
-openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
-askama = "0.14"
+oauth2 = { version = "5", default-features = false }
+jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs"] }
+askama = { version = "0.16.1", default-features = false, features = ["derive", "std"] }
 url = "2"
 futures-util = "0.3"
 

@@ -110,12 +110,34 @@ async fn fixture() -> Fixture {
     let issuer = std::env::var("BRIGALOW_TEST_IDP_URL").unwrap();
     let mut authorities = Vec::new();
     for (i, org) in orgs.iter().enumerate() {
-        for client in ["valid", "wrong-audience", "expired", "wrong-nonce"] {
+        for client in [
+            "valid",
+            "wrong-audience",
+            "expired",
+            "wrong-nonce",
+            "missing-nonce",
+            "missing-iat",
+            "future-iat",
+            "negative-iat",
+            "extra-audience",
+            "wrong-azp",
+            "bad-typ",
+            "bad-cty",
+            "bad-crit",
+            "bad-jwk-use",
+            "bad-jwk-alg",
+            "bad-jwk-ops",
+            "duplicate-kid",
+        ] {
             authorities.push(Authority {
                 org_id: *org,
                 name: client.into(),
                 issuer: issuer.clone(),
-                jwks_url: format!("{issuer}/jwks"),
+                jwks_url: if client.starts_with("bad-jwk-") || client == "duplicate-kid" {
+                    format!("{issuer}/jwks/{client}")
+                } else {
+                    format!("{issuer}/jwks")
+                },
                 human: Some(HumanConfig {
                     client_id: client.into(),
                     authorization_url: format!("{issuer}/authorize"),
@@ -353,7 +375,24 @@ async fn at_id_01_pkce_nonce_groups_and_one_use_browser_bound_login() {
         complete(&f, org, "valid", &binding, &state, &code).await.0,
         401
     );
-    for provider in ["wrong-audience", "expired", "wrong-nonce"] {
+    for provider in [
+        "wrong-audience",
+        "expired",
+        "wrong-nonce",
+        "missing-nonce",
+        "missing-iat",
+        "future-iat",
+        "negative-iat",
+        "extra-audience",
+        "wrong-azp",
+        "bad-typ",
+        "bad-cty",
+        "bad-crit",
+        "bad-jwk-use",
+        "bad-jwk-alg",
+        "bad-jwk-ops",
+        "duplicate-kid",
+    ] {
         let (binding, state, code) = begin(&f, org, provider).await;
         assert_eq!(
             complete(&f, org, provider, &binding, &state, &code).await.0,
@@ -2853,7 +2892,7 @@ async fn at_ca_01_02_operator_tool_restart_and_publication() {
     .fetch_one(&f.admin)
     .await
     .unwrap();
-    sqlx::query(&sql)
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .execute(&f.admin)
         .await
         .map_err(|_| "cannot create ephemeral CA login")

@@ -1,0 +1,26 @@
+name: dependency audit
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+permissions:
+  contents: read
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Stable Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Install pinned audit tool
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit application and fuzz lockfiles (no advisory exceptions)
+        run: |
+          cargo audit --deny warnings
+          cargo audit --no-fetch --file fuzz/Cargo.lock --deny warnings

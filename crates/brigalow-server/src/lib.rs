@@ -42,7 +42,9 @@ pub fn router(store: Store, mode: Mode) -> Router {
     })
 }
 pub fn application(state: AppState) -> Router {
-    let mut router = Router::new().route("/healthz", get(health));
+    let mut router = Router::new()
+        .route("/healthz", get(health))
+        .route("/livez", get(|| async { StatusCode::OK }));
     for (name, kind) in web::OBJECT_ROUTES {
         router = router.route(
             &format!("/v1/orgs/{{org}}/{name}/{{id}}"),
@@ -108,7 +110,23 @@ pub fn application(state: AppState) -> Router {
         .with_state(state)
 }
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let healthy = state.store.healthy().await;
+    let signing_available = state.keys.is_some() && state.identity.is_some();
+    let backend_healthy = if state.mode == Mode::Production {
+        if let Some(keys) = state.keys.as_ref().filter(|_| signing_available) {
+            let backend = keys.backend.clone();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                tokio::task::spawn_blocking(move || !backend.is_lab() && backend.healthy()),
+            )
+            .await
+            .is_ok_and(|result| result.unwrap_or(false))
+        } else {
+            false
+        }
+    } else {
+        true
+    };
+    let healthy = state.store.healthy().await && backend_healthy;
     (
         if healthy {
             StatusCode::OK
@@ -116,7 +134,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
             StatusCode::SERVICE_UNAVAILABLE
         },
         Json(
-            serde_json::json!({"status":if healthy{"ok"}else{"unavailable"},"mode":state.mode,"signing_available":state.keys.is_some() && state.identity.is_some()}),
+            serde_json::json!({"status":if healthy{"ok"}else{"unavailable"},"mode":state.mode,"signing_available":signing_available && backend_healthy}),
         ),
     )
 }

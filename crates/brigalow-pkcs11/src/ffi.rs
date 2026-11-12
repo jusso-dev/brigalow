@@ -427,12 +427,12 @@ fn attribute(
         CKA_MODULUS_BITS if object < 3 => Ok(ulong(3072)),
         CKA_PUBLIC_KEY_INFO if object < 3 => Ok(remote.key.public_key.clone()),
         CKA_MODULUS | CKA_PUBLIC_EXPONENT if object < 3 => {
-            let key = rsa::RsaPublicKey::from_public_key_der(&remote.key.public_key)
+            let key = rsa::PublicKey::from_public_key_der(&remote.key.public_key)
                 .map_err(|_| CKR_DEVICE_ERROR)?;
             Ok(if kind == CKA_MODULUS {
-                key.n().to_bytes_be()
+                key.n_bytes().into_vec()
             } else {
-                key.e().to_bytes_be()
+                key.e_bytes().into_vec()
             })
         }
         CKA_CERTIFICATE_TYPE if object == 3 => Ok(ulong(CKC_X_509)),

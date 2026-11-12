@@ -1,7 +1,11 @@
 //! Operator-only audit checkpoint signing; dedicated HSM key, never a policy key.
-use brigalow_core::{audit::Verifier, Purpose};
+use brigalow_core::Purpose;
 use brigalow_crypto::{Algorithm, Key};
-use brigalow_server::config::{Backend, Config};
+use brigalow_server::{
+    audit_checkpoint::{self, Error},
+    config::{Backend, Config},
+    publish::Published,
+};
 use brigalow_store::Store;
 use clap::{Parser, Subcommand};
 use std::{
@@ -20,6 +24,7 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Sign, persist and atomically publish the current tenant head (uses the HSM).
     Checkpoint {
         #[arg(long)]
         org: Uuid,
@@ -28,105 +33,121 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Read-only re-export of an already persisted checkpoint; never uses the HSM or signs.
+    Recover {
+        #[arg(long)]
+        org: Uuid,
+        #[arg(long)]
+        seq: u64,
+        /// Independently pinned audit public key (DER), never one taken from the bundle.
+        #[arg(long)]
+        public_key: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
-fn write(path: &Path, bytes: &[u8]) -> Result<(), ()> {
+fn write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)
-        .map_err(|_| ())?;
+        .map_err(|_| Error::Failed)?;
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|_| ())
+        .map_err(|_| Error::Failed)
 }
-async fn execute(args: Args) -> Result<(), ()> {
-    let config = Config::load().map_err(|_| ())?;
-    if config.backend != Backend::Pkcs11 {
-        return Err(());
+fn read_bounded(path: &Path) -> Result<Vec<u8>, Error> {
+    let mut bytes = vec![];
+    std::fs::File::open(path)
+        .map_err(|_| Error::Failed)?
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::Failed)?;
+    if bytes.len() > 4096 {
+        return Err(Error::Failed);
     }
-    let backend = config.key_backend().map_err(|_| ())?.ok_or(())?;
+    Ok(bytes)
+}
+/// Signing commands only: the PKCS#11 backend is required, with no fallback.
+fn signing_backend(
+    config: &Config,
+) -> Result<std::sync::Arc<dyn brigalow_crypto::KeyBackend>, Error> {
+    if config.backend != Backend::Pkcs11 {
+        return Err(Error::Failed);
+    }
+    config
+        .key_backend()
+        .map_err(|_| Error::Failed)?
+        .ok_or(Error::Failed)
+}
+async fn execute(args: Args) -> Result<String, Error> {
+    let config = Config::load().map_err(|_| Error::Failed)?;
     match args.command {
         Command::Init { output } => {
-            std::fs::create_dir(&output).map_err(|_| ())?;
+            let backend = signing_backend(&config)?;
+            std::fs::create_dir(&output).map_err(|_| Error::Failed)?;
             let key = backend
                 .generate(Algorithm::P256, Purpose::Release)
-                .map_err(|_| ())?;
+                .map_err(|_| Error::Failed)?;
             write(
                 &output.join("audit-key.json"),
-                &serde_json::to_vec(&key).map_err(|_| ())?,
+                &serde_json::to_vec(&key).map_err(|_| Error::Failed)?,
             )?;
             write(
                 &output.join("audit-public.der"),
-                &backend.public_key(&key).map_err(|_| ())?,
+                &backend.public_key(&key).map_err(|_| Error::Failed)?,
             )?;
+            Ok("Audit key initialised. Pin audit-public.der through an independent trusted channel.".into())
         }
         Command::Checkpoint { org, key, output } => {
-            // Create output directory first, but no signature is published until persistence succeeds.
-            std::fs::create_dir(&output).map_err(|_| ())?;
-            let mut bytes = vec![];
-            std::fs::File::open(key)
-                .map_err(|_| ())?
-                .take(4097)
-                .read_to_end(&mut bytes)
-                .map_err(|_| ())?;
-            if bytes.len() > 4096 {
-                return Err(());
-            }
-            let key: Key = serde_json::from_slice(&bytes).map_err(|_| ())?;
+            let backend = signing_backend(&config)?;
+            let key: Key =
+                serde_json::from_slice(&read_bounded(&key)?).map_err(|_| Error::Failed)?;
             let store = Store::connect(config.database_options())
                 .await
-                .map_err(|_| ())?;
-            let tenant = store.tenant(org);
-            let checkpoint = tenant.checkpoint_head(&key).await.map_err(|_| ())?;
-            let mut verifier = Verifier::default();
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(output.join("audit.jsonl"))
-                .map_err(|_| ())?;
-            while verifier.count() < checkpoint.seq {
-                let entries = tenant
-                    .audit_page(verifier.count() as i64, 1000)
-                    .await
-                    .map_err(|_| ())?;
-                if entries.is_empty() {
-                    return Err(());
-                }
-                for entry in entries
-                    .into_iter()
-                    .take((checkpoint.seq - verifier.count()) as usize)
-                {
-                    verifier.push(&entry).map_err(|_| ())?;
-                    serde_json::to_writer(&mut file, &entry).map_err(|_| ())?;
-                    file.write_all(b"\n").map_err(|_| ())?;
-                }
-            }
-            if !verifier.matches_checkpoint(&checkpoint) {
-                return Err(());
-            }
-            file.sync_all().map_err(|_| ())?;
-            let signed =
-                brigalow_crypto::audit::sign(backend.as_ref(), &key, checkpoint).map_err(|_| ())?;
-            tenant.save_checkpoint(&signed).await.map_err(|_| ())?;
-            write(
-                &output.join("checkpoint.json"),
-                &serde_json::to_vec(&signed).map_err(|_| ())?,
-            )?;
-            write(
-                &output.join("checkpoint.bytes"),
-                &signed.checkpoint.message().map_err(|_| ())?,
-            )?;
-            write(&output.join("checkpoint.sig"), &signed.signature)?;
+                .map_err(|_| Error::Failed)?;
+            let result = audit_checkpoint::create(
+                &store.tenant(org),
+                backend.as_ref(),
+                &key,
+                &output,
+                &mut |_| Ok(()),
+            )
+            .await;
             store.close().await;
+            let seq = result?;
+            Ok(format!("Checkpoint {seq} signed, persisted and published. Retain it independently and record the expected head outside this host."))
+        }
+        Command::Recover {
+            org,
+            seq,
+            public_key,
+            output,
+        } => {
+            // No key backend is loaded: recovery must work with the HSM absent or disabled.
+            let pinned = read_bounded(&public_key)?;
+            let store = Store::connect(config.database_options())
+                .await
+                .map_err(|_| Error::Failed)?;
+            let result =
+                audit_checkpoint::recover(&store.tenant(org), org, seq, &pinned, &output).await;
+            store.close().await;
+            Ok(match result? {
+                Published::Created => format!("Persisted checkpoint {seq} verified with the pinned key and recovered without signing."),
+                Published::Identical => format!("Existing output for checkpoint {seq} is identical to the verified persisted checkpoint."),
+            })
         }
     }
-    eprintln!("Audit operation complete. Retain checkpoint independently; pin the audit public key out of band.");
-    Ok(())
 }
 #[tokio::main]
 async fn main() {
-    if execute(Args::parse()).await.is_err() {
-        eprintln!("Audit operation failed; reconcile persisted checkpoints before retrying.");
-        std::process::exit(1);
+    match execute(Args::parse()).await {
+        Ok(message) => {
+            eprintln!("{message}");
+        }
+        Err(error) => {
+            eprintln!("Audit operation failed: {error}");
+            std::process::exit(1);
+        }
     }
 }

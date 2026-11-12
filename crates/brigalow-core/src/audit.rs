@@ -247,3 +247,86 @@ impl Verifier {
             && self.previous.as_ref() == Some(&checkpoint.entry_hash)
     }
 }
+
+/// Latest head an operator retained outside the Brigalow DB and signing host. It is the
+/// freshness anchor: a valid signature alone cannot show that no newer head was withheld.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedHead {
+    pub org_id: Uuid,
+    pub seq: u64,
+    pub entry_hash: String,
+}
+impl ExpectedHead {
+    /// Parse `<org-uuid>:<seq>:<entry-hash>` (lowercase hex SHA-256).
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split(':');
+        let (org, seq, hash) = (parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some()
+            || hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !seq.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        let org_id = Uuid::try_parse(org).ok().filter(|org| !org.is_nil())?;
+        let seq = seq
+            .parse()
+            .ok()
+            .filter(|seq| (1..=MAX_INTEGER).contains(seq))?;
+        Some(Self {
+            org_id,
+            seq,
+            entry_hash: hash.into(),
+        })
+    }
+    /// Exact match only; an older or substituted checkpoint is never accepted.
+    pub fn matches(&self, checkpoint: &Checkpoint) -> bool {
+        self.org_id == checkpoint.org_id
+            && self.seq == checkpoint.seq
+            && self.entry_hash == checkpoint.entry_hash
+    }
+}
+
+#[cfg(test)]
+mod expected_head_tests {
+    use super::*;
+    #[test]
+    fn parses_only_exact_heads() {
+        let org = Uuid::new_v4();
+        let hash = "a".repeat(64);
+        let head = ExpectedHead::parse(&format!("{org}:7:{hash}")).unwrap();
+        assert_eq!((head.org_id, head.seq), (org, 7));
+        for bad in [
+            format!("{org}:0:{hash}"),
+            format!("{org}:+7:{hash}"),
+            format!("{org}:7:{}", "A".repeat(64)),
+            format!("{org}:7:{}", "a".repeat(63)),
+            format!("{org}:7:{hash}:x"),
+            format!("{}:7:{hash}", Uuid::nil()),
+            format!("{org}:9007199254740992:{hash}"),
+            format!("{org}:7"),
+        ] {
+            assert!(ExpectedHead::parse(&bad).is_none(), "{bad}");
+        }
+        let checkpoint = Checkpoint {
+            version: 1,
+            org_id: org,
+            seq: 7,
+            entry_hash: hash.clone(),
+            at: 1,
+            key_id: Uuid::new_v4(),
+            algorithm: crate::keys::Algorithm::P256,
+        };
+        assert!(head.matches(&checkpoint));
+        assert!(!head.matches(&Checkpoint {
+            seq: 6,
+            ..checkpoint.clone()
+        }));
+        assert!(!head.matches(&Checkpoint {
+            org_id: Uuid::new_v4(),
+            ..checkpoint
+        }));
+    }
+}

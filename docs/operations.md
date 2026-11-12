@@ -29,9 +29,43 @@ brig audit verify checkpoint-001/audit.jsonl \
   --checkpoint checkpoint-001/checkpoint.json --public-key audit-key/audit-public.der
 ```
 
-Init emits only a public key and public HSM reference. Checkpoint creation reads a DB-clock head, verifies and exports the complete prefix, signs a domain-separated canonical record, persists it, then writes public signature outputs. New events may arrive afterward; this checkpoint authenticates precisely its recorded prefix. Its payload binds version, organisation, sequence, entry hash, timestamp, key ID and algorithm. The offline verifier requires the exact prefix and independently supplied public key, rejecting suffix truncation, mixed tenants, wrong key and modified checkpoint. `brig audit verify` without checkpoint remains explicitly chain-integrity-only.
+Init emits only a public key and public HSM reference. Checkpoint creation reads a DB-clock head, verifies and exports the complete prefix, signs a domain-separated canonical record, persists it, then publishes the public outputs. New events may arrive afterward; this checkpoint authenticates precisely its recorded prefix. Its payload binds version, organisation, sequence, entry hash, timestamp, key ID and algorithm. The offline verifier requires the exact prefix and independently supplied public key, rejecting suffix truncation, mixed tenants, wrong key and modified checkpoint. `brig audit verify` without checkpoint remains explicitly chain-integrity-only.
 
-Retain the latest checkpoint outside the database and pin the audit public key through an independent trusted channel. A public key delivered alongside an untrusted replacement export does not establish authenticity. Offline verification cannot know a newer checkpoint was withheld unless the verifier already knows its expected sequence/head. Preserve keys/checkpoints through rotation and disaster recovery. Recover persisted checkpoints after output interruption rather than blindly re-signing the same head. OpenSSL can verify `checkpoint.sig` over the SHA-256 digest of `checkpoint.bytes` using `pkeyutl -verify -pubin -keyform DER -pkeyopt digest:sha256` for the initial P-256 audit key.
+### Output bundle
+
+Both `checkpoint` and `recover` stage output in a new private (0700) sibling directory on the same filesystem, create each file exclusively (0400, symlinks refused), fsync it, then write `COMPLETE.json` last. The marker binds format version, organisation, sequence, entry hash and the SHA-256 of `audit.jsonl`, `checkpoint.json`, `checkpoint.bytes` and `checkpoint.sig`. The whole directory is then published with a kernel no-replace rename (Linux `renameat2` `RENAME_NOREPLACE`, macOS `renameatx_np` `RENAME_EXCL`) and the parent is fsynced. An existing output path is never replaced. Other platforms fail before signing; there is no existence-check emulation. An interrupted run leaves no published directory, though a `.brigalow-stage-*` directory may remain after a crash. Treat that as incomplete and delete it. The marker proves completeness only, not who wrote the bundle or whether it is the latest head.
+
+### Freshness
+
+A valid signature does not show a checkpoint is current. Record each published head as `<org>:<seq>:<entry_hash>` (from `checkpoint.json`) in a store outside the Brigalow DB and signing host, then verify against it:
+
+```sh
+brig audit verify checkpoint-001/audit.jsonl --checkpoint checkpoint-001/checkpoint.json \
+  --public-key /independent/audit-public.der --expected-head <org>:<seq>:<entry_hash>
+```
+
+The verifier rejects an older, newer or substituted checkpoint. Without `--expected-head` it reports "cryptographically valid prefix; freshness unknown". Do not treat that result as current or retained. If the external head is unavailable or was not advanced, do not declare off-host retention or a current audit state.
+
+### Recovering an interrupted checkpoint
+
+If `checkpoint` fails after reporting that persistence succeeded or is unconfirmed, do not re-run it for that head. Recover the persisted record instead:
+
+```sh
+brigalow-audit recover --org <UUID> --seq <SEQ> \
+  --public-key /independent/audit-public.der --output checkpoint-001-recovered
+```
+
+1. Use the sequence from the failure message, or the head you expected. Pin the public key from your independent copy, never from a partial output directory.
+2. `recover` is read-only. It loads no key backend (`backend = "disabled"` is fine, and no HSM module or PIN is needed), never signs and never inserts a record. It verifies the stored signature with the pinned key, rebuilds the exact audit prefix with bounded paged reads, and publishes an identical bundle.
+3. Running it onto an existing complete directory checks it byte-for-byte; any difference fails and nothing is replaced.
+4. A missing record, wrong organisation or key, changed prefix, or malformed or tampered record fails with a generic message. "No persisted checkpoint is visible" means nothing was retained for that sequence. It does not show that the HSM did not sign during the interrupted attempt. Investigate with HSM and audit evidence rather than assuming no signature exists.
+5. If nothing was persisted, a later `checkpoint` run signs the then-current head as a new record. Re-signing an already persisted head is refused (the command reports it and directs you to `recover`).
+
+### Scheduling and retention
+
+Scheduling is operator-owned. A local scheduler may run `checkpoint` and the `recover`/`brig audit verify` check as separate jobs at explicit intervals, with monitoring on local exit status. Brigalow sends no email, contacts no network destination and does not retry failures silently. Copying bundles off the host, making storage immutable, and updating the expected-head record are operator procedures outside Brigalow. A bundle on the signing host is not independent retention.
+
+Retain the latest checkpoint outside the database and pin the audit public key through an independent trusted channel. A public key delivered alongside an untrusted replacement export does not establish authenticity. Preserve keys/checkpoints through rotation and disaster recovery. Record key rotations with independently pinned old and new keys; a `key_id` alone is not a trust anchor. OpenSSL can verify `checkpoint.sig` over the SHA-256 digest of `checkpoint.bytes` using `pkeyutl -verify -pubin -keyform DER -pkeyopt digest:sha256` for the initial P-256 audit key.
 
 ## Backup and recovery
 
@@ -42,7 +76,7 @@ The HSM's keys remain in the HSM. Use only its supported operator backup/HA proc
 Recovery sequence:
 
 1. Stop signing and CA issuance. Retain current externally stored audit checkpoints and CRLs. Restore into an isolated database using the owner role; restore restricted runtime roles/grants and verify TLS configuration.
-2. Verify every audit chain and the latest independently retained signed checkpoint. Compare snapshot age, CA revocations, CRL numbers and consumed release-window caps against external evidence. An older DB snapshot can lose revocations or consumed authority; reconcile before enabling service.
+2. Verify every audit chain and the latest independently retained signed checkpoint with `--expected-head` from the external record; a restored older snapshot fails that check. Compare snapshot age, CA revocations, CRL numbers and consumed release-window caps against external evidence. An older DB snapshot can lose revocations or consumed authority; reconcile before enabling service.
 3. Confirm every required HSM key reference resolves to the expected public key and remains sensitive/non-exportable. Do not silently generate replacements or select software keys.
 4. Confirm pending approvals remain pending. Investigate interrupted `gating`, `signing`, CA issuance and CRL intents using backend/audit evidence. Never automatically repeat a possibly completed signature. An org admin or auditor can read a stranded request with `GET /v1/orgs/{org}/requests/{id}/inspection`; it reports state, policy/key and audit events, always marks the outcome unknown and changes nothing. Before submitting any replacement request, stop submission and independently confirm with the HSM vendor's tooling that the old worker and its device operations have stopped. Brigalow cannot mark the request resolved and does not refund consumed window capacity.
 5. Reconcile credentials, policies, windows and configuration, then re-enable only the intended services. Test operator-owned recovery procedures periodically.

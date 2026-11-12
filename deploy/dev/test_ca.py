@@ -72,6 +72,8 @@ db_ca_file = "/test-secrets/ca.crt"
         run("openssl", "verify", "-purpose", "any", "-CAfile", "root.pem", "-untrusted", "issuer.pem",
             "-CRLfile", name + ".pem", "-crl_check", "leaf.pem", ok=(name == "before"))
     # A separate HSM audit key and ordinary append-only application DB role.
+    (root / "ca.toml").write_text((root / "runtime.toml").read_text())
+    ca_config = str(root / "ca.toml")
     runtime = (root / "runtime.toml").read_text().replace(db_user, "brigalow_runtime")
     (root / "runtime.toml").write_text(runtime)
     audit = "/work/target/debug/brigalow-audit"
@@ -87,7 +89,60 @@ db_ca_file = "/test-secrets/ca.crt"
     pathlib.Path("checkpoint.digest").write_bytes(__import__("hashlib").sha256(b"tampered checkpoint").digest())
     run(*independent, ok=False)
     lines = pathlib.Path("checkpoint/audit.jsonl").read_bytes().splitlines(keepends=True)
-    pathlib.Path("checkpoint/audit.jsonl").write_bytes(b"".join(lines[:-1]))
-    run(*verify, ok=False)
+    pathlib.Path("truncated.jsonl").write_bytes(b"".join(lines[:-1]))
+    run(*[("truncated.jsonl" if arg == "checkpoint/audit.jsonl" else arg) for arg in verify], ok=False)
 
-print("CA operator CLI: HSM issuer survives restart, duplicate day refused, persisted outputs recovered, CRL revocation verified")
+    # AT-AUD-03: atomic private bundle, read-only recovery and expected-head freshness.
+    names = sorted(p.name for p in pathlib.Path("checkpoint").iterdir())
+    assert names == ["COMPLETE.json", "audit.jsonl", "checkpoint.bytes", "checkpoint.json", "checkpoint.sig"]
+    assert pathlib.Path("checkpoint").stat().st_mode & 0o7777 == 0o700
+    assert not [p for p in root.iterdir() if p.name.startswith(".brigalow-stage-")]
+    record = json.loads(pathlib.Path("checkpoint/checkpoint.json").read_bytes())["checkpoint"]
+    seq = str(record["seq"])
+    head = f"{record['org_id']}:{seq}:{record['entry_hash']}"
+    # Duplicate scheduling of the same head is refused without signing again.
+    run(audit, "checkpoint", "--org", org, "--key", "audit-key/audit-key.json", "--output", "repeat", ok=False)
+    assert not pathlib.Path("repeat").exists()
+    # Recovery needs no key backend: this config has no HSM module, token or PIN at all.
+    no_hsm = [line for line in runtime.splitlines() if not line.startswith(("backend", "hsm_"))]
+    (root / "recover.toml").write_text("\n".join(no_hsm + ['backend = "disabled"']) + "\n")
+    os.environ["BRIGALOW_CONFIG"] = str(root / "recover.toml")
+    run(audit, "checkpoint", "--org", org, "--key", "audit-key/audit-key.json", "--output", "nohsm", ok=False)
+    assert not pathlib.Path("nohsm").exists()
+    recover = [audit, "recover", "--org", org, "--seq", seq, "--public-key", "audit-key/audit-public.der"]
+    run(*recover, "--output", "audit-recovered")
+    for name in names:
+        assert pathlib.Path("checkpoint", name).read_bytes() == pathlib.Path("audit-recovered", name).read_bytes(), name
+    # Onto an existing complete directory: verified byte-for-byte, never replaced.
+    run(*recover, "--output", "checkpoint")
+    pathlib.Path("different").mkdir()
+    run(*recover, "--output", "different", ok=False)
+    assert list(pathlib.Path("different").iterdir()) == []
+    absent = subprocess.run([audit, "recover", "--org", org, "--seq", str(int(seq) + 100000), "--public-key",
+                             "audit-key/audit-public.der", "--output", "absent"], capture_output=True, timeout=60)
+    assert absent.returncode != 0 and b"does not show that the HSM did not sign" in absent.stderr
+    run("openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "other.key")
+    run("openssl", "ec", "-in", "other.key", "-pubout", "-outform", "DER", "-out", "other.der")
+    run(audit, "recover", "--org", org, "--seq", seq, "--public-key", "other.der", "--output", "wrong-key", ok=False)
+    run(audit, "recover", "--org", str(uuid.uuid4()), "--seq", seq, "--public-key", "audit-key/audit-public.der",
+        "--output", "wrong-org", ok=False)
+    for name in ["absent", "wrong-key", "wrong-org"]:
+        assert not pathlib.Path(name).exists()
+    os.environ["BRIGALOW_CONFIG"] = str(root / "runtime.toml")
+    pathlib.Path("recovered.digest").write_bytes(__import__("hashlib").sha256(pathlib.Path("audit-recovered/checkpoint.bytes").read_bytes()).digest())
+    run("openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER", "-inkey", "audit-key/audit-public.der",
+        "-sigfile", "audit-recovered/checkpoint.sig", "-in", "recovered.digest", "-pkeyopt", "digest:sha256")
+    recovered = ["/work/target/debug/brig", "audit", "verify", "audit-recovered/audit.jsonl", "--checkpoint",
+                 "audit-recovered/checkpoint.json", "--public-key", "audit-key/audit-public.der"]
+    assert b"freshness unknown" in run(*recovered)
+    assert b"expected head" in run(*recovered, "--expected-head", head)
+    # A newer checkpoint makes the recovered (older, valid) one stale against the retained head.
+    os.environ["BRIGALOW_CONFIG"] = ca_config
+    run(*args, "crl", "--output", "advance.crl")  # appends audit events, advancing the head
+    os.environ["BRIGALOW_CONFIG"] = str(root / "runtime.toml")
+    run(audit, "checkpoint", "--org", org, "--key", "audit-key/audit-key.json", "--output", "newer")
+    newer = json.loads(pathlib.Path("newer/checkpoint.json").read_bytes())["checkpoint"]
+    newer_head = f"{newer['org_id']}:{newer['seq']}:{newer['entry_hash']}"
+    run(*recovered, "--expected-head", newer_head, ok=False)
+
+print("CA operator CLI: HSM issuer survives restart, duplicate day refused, persisted outputs recovered, CRL revocation verified; audit checkpoint recovered read-only and freshness-checked")

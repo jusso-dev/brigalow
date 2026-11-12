@@ -1,9 +1,11 @@
 pub mod approvals;
+pub mod audit_checkpoint;
 pub mod auth;
 pub mod config;
 pub mod gates;
 pub mod keys;
 pub mod notifications;
+pub mod publish;
 pub mod rate_limit;
 pub mod recovery;
 pub mod signing;

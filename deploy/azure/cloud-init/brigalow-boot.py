@@ -22,7 +22,9 @@ import urllib.request
 
 IMDS = "http://169.254.169.254/metadata/identity/oauth2/token"
 # New role assignments can take up to 10 minutes to apply. Retry reads for longer than that,
-# then stop: a bounded total, not an open-ended loop.
+# then stop. No read starts after the deadline. One read makes nine calls (one token, eight
+# secrets) with a 10-second socket timeout each; that timeout bounds each blocking step rather
+# than the whole call, so allow headroom when sizing the unit's TimeoutStartSec.
 SECRET_DEADLINE_SECONDS = 15 * 60
 SECRET_RETRY_MAX_PAUSE = 60
 VAULT_RESOURCE = "https://vault.azure.net"
@@ -103,6 +105,9 @@ def read_secrets_until(vault, client_id, deadline_seconds=SECRET_DEADLINE_SECOND
             if remaining <= 0:
                 raise
             sleep(min(pause, remaining))
+            # Never begin another read once the deadline has passed.
+            if clock() >= end:
+                raise
             pause = min(pause * 2, SECRET_RETRY_MAX_PAUSE)
 
 

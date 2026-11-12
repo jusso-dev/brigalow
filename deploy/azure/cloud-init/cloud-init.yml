@@ -35,18 +35,17 @@ write_files:
       After=network-online.target docker.service
       Wants=network-online.target
       Requires=docker.service
-      # brigalow-boot.py retries Key Vault reads for up to 15 minutes itself. systemd adds at
-      # most two more starts after that, then leaves the unit failed for an operator.
-      StartLimitIntervalSec=3600
-      StartLimitBurst=3
       [Service]
       Type=oneshot
       RemainAfterExit=yes
       ExecStart=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py up -d --force-recreate
       ExecStop=/usr/bin/python3 -I /opt/brigalow/brigalow-boot.py down
-      TimeoutStartSec=1200
-      Restart=on-failure
-      RestartSec=60
+      # One start per boot. brigalow-boot.py retries Key Vault reads for at most 15 minutes and
+      # starts no read after that, then fails. There is no systemd restart loop, so a persistent
+      # failure leaves the unit failed for an operator. TimeoutStartSec is the hard cap on the
+      # whole start, including a slow final read and Compose.
+      TimeoutStartSec=1800
+      Restart=no
       [Install]
       WantedBy=multi-user.target
 runcmd:

@@ -145,6 +145,26 @@ class Boot(unittest.TestCase):
         self.assertLessEqual(clock[0], 900)
         self.assertGreaterEqual(clock[0], 600, "must allow at least 10 minutes for propagation")
         self.assertLessEqual(max(pauses), boot.SECRET_RETRY_MAX_PAUSE)
+        # Slow failures: each read takes the full 90 seconds of network timeouts. No read may
+        # start at or after the deadline, so the phase ends within deadline + one read.
+        clock[0], starts = 0.0, []
+        def slow(*_):
+            starts.append(clock[0])
+            clock[0] += 90
+            raise ValueError("timeout")
+        with patch.object(boot, "read_secrets", side_effect=slow):
+            with self.assertRaises(ValueError):
+                boot.read_secrets_until("v", "c", 900, lambda: clock[0], sleep)
+        self.assertTrue(all(t < 900 for t in starts), starts)
+        self.assertLessEqual(clock[0], 900 + 90)
+        self.assertGreaterEqual(len(starts), 2)
+
+    def test_boot_unit_runs_once_with_room_for_the_retry_phase(self):
+        unit = (HERE / "cloud-init/cloud-init.yml").read_text()
+        self.assertIn("Restart=no", unit)
+        self.assertNotIn("Restart=on-failure", unit)
+        timeout = int(unit.split("TimeoutStartSec=")[1].split()[0])
+        self.assertGreater(timeout, boot.SECRET_DEADLINE_SECONDS + 90)
 
     def test_imds_and_vault_calls_refuse_redirects_and_proxies(self):
         handlers = [type(h).__name__ for h in boot.OPENER.handlers]

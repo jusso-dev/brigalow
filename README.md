@@ -28,10 +28,10 @@ The Bicep in [deploy/azure](deploy/azure/README.md) runs one Brigalow VM that si
 
 You need:
 
-- an Azure subscription and resource group;
-- a completed Artifact Signing identity validation (portal only), with its ID;
+- an Azure subscription and resource group, with the `Microsoft.CodeSigning` resource provider registered;
+- a completed Artifact Signing identity validation (portal only, needs the Identity Verifier role), with its ID. Validations are subscription-scoped and shared across accounts. Creating the Artifact Signing account to start one begins billing;
 - an OIDC provider for staff, plus your CI's OIDC issuer;
-- a reviewed Brigalow production image pinned by digest.
+- a reviewed Brigalow production image pinned by digest, pullable by the VM without a registry login.
 
 ```bash
 cp deploy/azure/main.bicepparam.example deploy/azure/main.bicepparam   # fill placeholders; secrets via Key Vault references
@@ -39,7 +39,7 @@ az deployment group create --resource-group <rg> \
   --template-file deploy/azure/main.bicep --parameters deploy/azure/main.bicepparam
 ```
 
-Then, as separate owner steps from an admin host inside the VNet: `brigalow-admin migrate`, create the restricted runtime login, `brigalow-admin org-create --org <uuid> --name <name>`. Sign in, create a project, pin the profile's reviewed root and EKU, redeploy with the key binding, and register it as a custodian (`{"remote_key":"<uuid>","algorithm":"rsa3072","purpose":"release","offline":false}`). Create a policy, then sign from CI:
+The first boot is expected to show a failed server and no `/healthz`: the server cannot start until bootstrap creates its database login. Then, as separate owner steps from a temporary admin VM in the template's `vm` subnet (the only subnet the database admits): `brigalow-admin migrate`, create the restricted runtime login, `brigalow-admin org-create --org <uuid> --name <name>`. Sign in, create a project, pin the profile's reviewed root and EKU, redeploy with the key binding, and register it as a custodian (`{"remote_key":"<uuid>","algorithm":"rsa3072","purpose":"release","offline":false}`). Create a policy, then sign from CI:
 
 ```bash
 # BRIGALOW_TOKEN holds the CI job's workload OIDC token (audience brigalow:<org>), set by the CI
@@ -48,7 +48,7 @@ brig sign --server https://signing.example.org \
   --org <org> --project <project> --policy release --format cms --output app.cms app.bin
 ```
 
-[deploy/azure/README.md](deploy/azure/README.md) has every step, including timestamps: Microsoft's TSA is HTTP only, so use an HTTPS TSA you trust or disable timestamps knowingly. The certificates last 72 hours.
+[deploy/azure/README.md](deploy/azure/README.md) has every step, including timestamps: Microsoft's TSA is HTTP only, so set the optional `tsaUrl` parameters for an HTTPS TSA you trust, or leave them unset and disable timestamps knowingly. The certificates last 72 hours.
 
 ## Why
 

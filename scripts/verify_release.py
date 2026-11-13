@@ -30,6 +30,17 @@ COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+# Version 2 signature profile: the two exact DER SPKI encodings the PKCS#11 backend produces.
+# P-256 ECDSA (id-ecPublicKey, prime256v1, uncompressed point) and RSA-3072 rsaEncryption with
+# NULL parameters, a 384-byte modulus (top bit set) and exponent 65537. A structure check only.
+P256_PREFIX = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d03010703420004")
+P256_LENGTH = 91
+RSA3072_PREFIX = bytes.fromhex("308201a2300d06092a864886f70d0101010500" "0382018f00" "3082018a" "0282018100")
+RSA3072_SUFFIX = bytes.fromhex("0203010001")
+RSA3072_LENGTH = 422
+UNCHECKED_WARNING = ("WARNING: --revision-unchecked: the source commit was declared by the signer and was not "
+                     "compared with an expected revision, so an older validly signed release (a rollback) "
+                     "would also pass.")
 
 
 class Rejected(Exception):
@@ -95,8 +106,19 @@ def hash_member(directory_fd, name):
     return digest.hexdigest()
 
 
+def supported_key(spki_der):
+    """True only for the fixed version 2 profile: exact P-256 or RSA-3072/65537 SPKI encodings."""
+    if len(spki_der) == P256_LENGTH and spki_der.startswith(P256_PREFIX):
+        return True
+    return (len(spki_der) == RSA3072_LENGTH and spki_der.startswith(RSA3072_PREFIX)
+            and spki_der[len(RSA3072_PREFIX)] & 0x80 != 0 and spki_der.endswith(RSA3072_SUFFIX))
+
+
 def pinned_key(path, bundle):
-    """Normalise the separately pinned public key. A key inside the bundle cannot establish identity."""
+    """Normalise the separately pinned public key. A key inside the bundle cannot establish identity.
+
+    Only P-256 ECDSA and RSA-3072 (exponent 65537) keys are accepted, before any signature check.
+    """
     try:
         info = os.stat(path)
     except OSError:
@@ -109,6 +131,9 @@ def pinned_key(path, bundle):
     result = subprocess.run(["openssl", "pkey", "-pubin", "-in", str(path), "-outform", "DER"], capture_output=True)
     if result.returncode or not result.stdout:
         raise Rejected("pinned key is not a PEM public key")
+    if not supported_key(result.stdout):
+        raise Rejected("unsupported key algorithm: operator version 2 accepts only a P-256 ECDSA or "
+                       "RSA-3072 (exponent 65537) public key")
     return info, result.stdout
 
 
@@ -160,8 +185,15 @@ def operator_schema(manifest):
         names.add(name)
 
 
-def verify_operator_bundle(bundle, public_key, expected_revision=None, expected_key_sha256=None):
-    """Verify a version 2 operator bundle. Returns (pinned SPKI SHA-256, source commit)."""
+def verify_operator_bundle(bundle, public_key, expected_revision, expected_key_sha256=None,
+                           revision_unchecked=False):
+    """Verify a version 2 operator bundle. Returns (pinned SPKI SHA-256, source commit).
+
+    The caller must give the full expected source commit, or explicitly waive the comparison.
+    """
+    if (expected_revision is None) == (not revision_unchecked):
+        raise Rejected("operator verification requires exactly one of an expected revision or an explicit "
+                       "revision-unchecked waiver")
     bundle = Path(bundle)
     try:
         info = os.lstat(bundle)
@@ -202,16 +234,22 @@ def verify_operator_bundle(bundle, public_key, expected_revision=None, expected_
     return fingerprint, manifest["source_commit"]
 
 
-def operator_report(fingerprint, commit):
+def operator_report(fingerprint, commit, revision_checked=True):
+    revision = (f"source commit {commit} matches the expected revision" if revision_checked else
+                f"source commit {commit} was declared by the signer and NOT compared with an expected "
+                "revision, so an older validly signed release (a rollback) would also pass")
     return ("Operator release verified: manifest signature is valid for the separately pinned public key "
             f"(SPKI SHA-256 {fingerprint}) and every payload digest matches. Declared origin: operator "
-            f"(self-hosted), source commit {commit}. This is cryptographic validity and a declared label "
+            f"(self-hosted); {revision}. This is cryptographic validity and a declared label "
             "only; it is not a public-trust, CA or platform-trust decision.")
 
 
 def verify_operator(args):
-    print(operator_report(*verify_operator_bundle(args.directory, args.public_key, args.expected_revision,
-                                                  args.expected_key_sha256)))
+    fingerprint, commit = verify_operator_bundle(args.directory, args.public_key, args.expected_revision,
+                                                 args.expected_key_sha256, args.revision_unchecked)
+    if args.revision_unchecked:
+        print(UNCHECKED_WARNING, file=sys.stderr)
+    print(operator_report(fingerprint, commit, revision_checked=not args.revision_unchecked))
 
 
 def verify_lab(args):
@@ -242,11 +280,19 @@ def main():
                         help="lab: version 1 lab bundle; operator: strict version 2 operator bundle")
     parser.add_argument("--public-key", required=True, type=Path,
                         help="independently trusted PEM public key; operator mode refuses a key inside the bundle")
-    parser.add_argument("--expected-revision", help="operator mode: required full source commit ID")
+    revision = parser.add_mutually_exclusive_group()
+    revision.add_argument("--expected-revision",
+                          help="operator mode: the full source commit you expect, from an independently trusted "
+                               "channel; operator mode requires this or --revision-unchecked")
+    revision.add_argument("--revision-unchecked", action="store_true",
+                          help="operator mode: knowingly skip the source commit comparison; the commit is then "
+                               "only the signer's claim and a rollback to an older signed release also passes")
     parser.add_argument("--expected-key-sha256", help="operator mode: SHA-256 of the pinned key's DER SPKI")
     args = parser.parse_args()
-    if args.mode == "lab" and (args.expected_revision or args.expected_key_sha256):
-        parser.error("--expected-revision and --expected-key-sha256 apply to operator mode only")
+    if args.mode == "lab" and (args.expected_revision or args.expected_key_sha256 or args.revision_unchecked):
+        parser.error("--expected-revision, --revision-unchecked and --expected-key-sha256 apply to operator mode only")
+    if args.mode == "operator" and args.expected_revision is None and not args.revision_unchecked:
+        parser.error("operator mode requires --expected-revision <full commit> (or an explicit --revision-unchecked)")
     try:
         (verify_operator if args.mode == "operator" else verify_lab)(args)
     except Rejected as error:

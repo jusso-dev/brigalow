@@ -40,6 +40,22 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
     }
     Ok(())
 }
+/// Default and maximum time `brig sign` polls a pending request before giving up. The maximum
+/// matches the longest approval expiry (seven days).
+const DEFAULT_WAIT_SECS: u64 = 300;
+const MAX_WAIT_SECS: u64 = 604_800;
+/// `--wait <seconds>`: how long to poll for approvals, gates and windows (1 to 604800, default 300).
+fn wait_seconds(value: Option<&str>) -> Result<u64, &'static str> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_WAIT_SECS);
+    };
+    match value.parse::<u64>() {
+        Ok(seconds) if (1..=MAX_WAIT_SECS).contains(&seconds) && !value.starts_with('+') => {
+            Ok(seconds)
+        }
+        _ => Err("--wait must be whole seconds from 1 to 604800"),
+    }
+}
 pub async fn run(args: &[OsString]) -> Result<(), &'static str> {
     let mut options = BTreeMap::new();
     let mut file = None;
@@ -55,6 +71,7 @@ pub async fn run(args: &[OsString]) -> Result<(), &'static str> {
                 "--server",
                 "--output",
                 "--ca-file",
+                "--wait",
             ]
             .contains(&value)
                 || i + 1 >= args.len()
@@ -98,6 +115,7 @@ pub async fn run(args: &[OsString]) -> Result<(), &'static str> {
         return Err("server requires HTTPS without URL credentials");
     }
     base.set_path("/");
+    let wait = wait_seconds(options.get("--wait").copied())?;
     let token = std::env::var("BRIGALOW_TOKEN").map_err(|_| "BRIGALOW_TOKEN required")?;
     let mut builder = reqwest::Client::builder()
         .https_only(true)
@@ -189,7 +207,7 @@ pub async fn run(args: &[OsString]) -> Result<(), &'static str> {
         .map_err(|_| "signing request interrupted; check request status before retry")?;
     let mut result: SignRequest = serde_json::from_slice(&bounded(response).await?)
         .map_err(|_| "invalid signing response")?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
     while matches!(
         result.state,
         RequestState::AwaitingApproval | RequestState::Gating | RequestState::Signing
@@ -251,4 +269,20 @@ pub async fn run(args: &[OsString]) -> Result<(), &'static str> {
     }
     println!("Signed request {}", submission.request_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_defaults_and_bounds() {
+        assert_eq!(wait_seconds(None), Ok(300));
+        assert_eq!(wait_seconds(Some("1")), Ok(1));
+        assert_eq!(wait_seconds(Some("420")), Ok(420));
+        assert_eq!(wait_seconds(Some("604800")), Ok(604_800));
+        for bad in ["0", "604801", "-5", "+5", "1.5", "", " 5", "five"] {
+            assert!(wait_seconds(Some(bad)).is_err(), "{bad:?} accepted");
+        }
+    }
 }

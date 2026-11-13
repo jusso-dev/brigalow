@@ -420,11 +420,18 @@ async fn at_rel_03_tool_operator_release_through_production_policy_path() {
             .unwrap()
             .all(|e| !e.unwrap().file_name().to_string_lossy().starts_with('.'))
     };
+    // Operator mode requires the expected revision, so a failure here is never a missing flag.
     let verify = |bundle: &Path, mode: &str, key: &Path| {
+        let revision: &[&str] = if mode == "operator" {
+            &["--expected-revision", &commit]
+        } else {
+            &[]
+        };
         std::process::Command::new("python3")
             .arg("/work/scripts/verify_release.py")
             .arg(bundle)
             .args(["--mode", mode, "--public-key", key.to_str().unwrap()])
+            .args(revision)
             .output()
             .unwrap()
             .status

@@ -9,16 +9,19 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
 import textwrap
+import time
 import unittest
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 from operator_release import Failed, publish_no_replace  # noqa: E402
+from verify_release import Rejected, verify_operator_bundle  # noqa: E402
 from package_release import operator_manifest  # noqa: E402
 from verify_release import ARCHIVE, SBOM, canonical  # noqa: E402
 
@@ -28,18 +31,27 @@ WORKFLOW = [sys.executable, str(SCRIPTS/"operator_release.py")]
 FAKE_BRIG = textwrap.dedent('''\
     #!/usr/bin/env python3
     """Test double for `brig sign --format raw`. Never contacts a server."""
-    import os, pathlib, subprocess, sys, time, uuid
+    import os, pathlib, signal, subprocess, sys, time, uuid
     args = sys.argv[1:]
     assert args[0] == "sign" and args[args.index("--format") + 1] == "raw"
     output, artifact = pathlib.Path(args[args.index("--output") + 1]), pathlib.Path(args[-1])
     with open(os.environ["FAKE_BRIG_CALLS"], "a") as calls:
-        calls.write("call\\n")
+        calls.write(f"call --wait {args[args.index('--wait') + 1]}\\n")
     mode = os.environ["FAKE_BRIG_MODE"]
     request = uuid.uuid4()
+
+    def terminated(signum, _frame):
+        pathlib.Path(os.environ["FAKE_BRIG_PID"] + ".terminated").write_text(str(signum))
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, terminated)
     print(f"Submitting request {request}", file=sys.stderr, flush=True)
     if mode == "deny":
         sys.exit("server rejected request; no signature written")
+    if mode == "pending":
+        sys.exit("approval still pending; query the submitted request ID (do not resubmit)")
     if mode == "hang":
+        pathlib.Path(os.environ["FAKE_BRIG_PID"]).write_text(str(os.getpid()))
         time.sleep(600)
     if mode == "collide":
         target = pathlib.Path(os.environ["FAKE_BRIG_COLLIDE"])
@@ -56,6 +68,10 @@ FAKE_BRIG = textwrap.dedent('''\
     os.close(fd)
     if mode == "timestamp":
         pathlib.Path(f"{output}.tsr").write_bytes(b"unauthenticated token")
+    if mode == "kill-parent":
+        # Kill point: the signature has landed in staging and the workflow dies without cleanup.
+        os.kill(os.getppid(), signal.SIGKILL)
+        time.sleep(5)
     print(f"Signed request {request}")
 ''')
 
@@ -66,9 +82,24 @@ def openssl(*args, data=None):
     return result.stdout
 
 
-def keypair(directory, name):
+P256 = ("EC", "ec_paramgen_curve:P-256")
+RSA3072 = ("RSA", "rsa_keygen_bits:3072")
+# Keys outside the fixed version 2 profile. Each is generated at test time.
+UNSUPPORTED = {
+    "RSA-2048": ("RSA", "rsa_keygen_bits:2048"),
+    "RSA-4096": ("RSA", "rsa_keygen_bits:4096"),
+    "RSA-3072 exponent 3": ("RSA", "rsa_keygen_bits:3072", "rsa_keygen_pubexp:3"),
+    "P-384": ("EC", "ec_paramgen_curve:P-384"),
+    "RSA-PSS 3072": ("RSA-PSS", "rsa_keygen_bits:3072"),
+    "Ed25519": ("ED25519",),
+}
+
+
+def keypair(directory, name, spec=P256):
     private, public = directory/f"{name}.key", directory/f"{name}.pem"
-    openssl("genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(private))
+    algorithm, *options = spec
+    openssl("genpkey", "-algorithm", algorithm, *[arg for option in options for arg in ("-pkeyopt", option)],
+            "-out", str(private))
     openssl("pkey", "-in", str(private), "-pubout", "-out", str(public))
     return private, public
 
@@ -106,7 +137,12 @@ class Fixture(unittest.TestCase):
             sig.chmod(0o600)
         sig.write_bytes(signature)
 
-    def verify(self, bundle, *extra, mode="operator", key=None):
+    def verify(self, bundle, *extra, mode="operator", key=None, revision="fixture"):
+        """Operator mode passes the fixture commit as --expected-revision unless told otherwise."""
+        if mode == "operator" and revision == "fixture":
+            revision = getattr(self, "commit", None)
+        if mode == "operator" and revision is not None and "--expected-revision" not in extra:
+            extra = ("--expected-revision", revision, *extra)
         return subprocess.run(VERIFY + [str(bundle), "--mode", mode, "--public-key", str(key or self.public), *extra],
                               capture_output=True, text=True)
 
@@ -191,6 +227,59 @@ class OperatorVerifier(Fixture):
         self.assert_rejected(self.bundle, "--expected-revision", "b" * 40, reason="expected revision")
         self.assert_rejected(self.bundle, "--expected-revision", "HEAD", reason="full lowercase")
         self.assertEqual(self.verify(self.bundle, "--expected-revision", self.commit).returncode, 0)
+
+    def test_missing_expected_revision_is_refused(self):
+        result = self.assert_rejected(self.bundle, revision=None, reason="requires --expected-revision")
+        self.assertNotIn("verified", result.stdout)
+        self.assert_rejected(self.bundle, "--revision-unchecked", reason="not allowed with")
+        with self.assertRaises(Rejected):
+            verify_operator_bundle(self.bundle, self.public, None)
+        with self.assertRaises(Rejected):
+            verify_operator_bundle(self.bundle, self.public, self.commit, revision_unchecked=True)
+        self.assertNotEqual(self.verify(self.bundle, "--revision-unchecked", mode="lab").returncode, 0)
+
+    def test_revision_unchecked_passes_with_rollback_warning(self):
+        result = self.verify(self.bundle, "--revision-unchecked", revision=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WARNING: --revision-unchecked", result.stderr)
+        self.assertIn("declared by the signer", result.stderr)
+        self.assertIn("rollback", result.stderr)
+        self.assertIn(f"source commit {self.commit} was declared by the signer and NOT compared", result.stdout)
+        checked = self.verify(self.bundle)
+        self.assertIn("matches the expected revision", checked.stdout)
+        self.assertNotIn("WARNING", checked.stderr)
+        # The waiver skips only the comparison: signature, schema and payload checks still apply.
+        (self.bundle/SBOM).write_bytes(b"tampered")
+        self.assert_rejected(self.bundle, "--revision-unchecked", revision=None, reason="digest mismatch")
+
+    def test_rsa3072_bundle_verifies(self):
+        key, public = keypair(self.root, "rsa3072", RSA3072)
+        self.write(self.manifest(), key=key)
+        result = self.verify(self.bundle, "--expected-key-sha256", spki_sha256(public), key=public)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_rejected(self.bundle, reason="signature invalid")
+
+    def test_unsupported_key_algorithms_rejected_before_openssl(self):
+        explicit = self.root/"p256-explicit.pem"
+        openssl("ec", "-in", str(self.key), "-pubout", "-param_enc", "explicit", "-out", str(explicit))
+        compressed = self.root/"p256-compressed.pem"
+        openssl("ec", "-in", str(self.key), "-pubout", "-conv_form", "compressed", "-out", str(compressed))
+        # Same P-256 key, other valid encodings: the exact-encoding check fails closed.
+        for public in [explicit, compressed]:
+            with self.subTest(encoding=public.name):
+                self.assert_rejected(self.bundle, key=public, reason="unsupported key algorithm")
+        for name, spec in UNSUPPORTED.items():
+            with self.subTest(key=name):
+                key, public = keypair(self.root, name.replace(" ", "-"), spec)
+                if spec[0] != "ED25519":  # dgst -sha256 cannot drive Ed25519; the key check comes first anyway.
+                    self.write(self.manifest(), key=key)
+                    check = subprocess.run(["openssl", "dgst", "-sha256", "-verify", str(public), "-signature",
+                                            str(self.bundle/"manifest.sig"), str(self.bundle/"manifest.json")],
+                                           capture_output=True)
+                    self.assertEqual(check.returncode, 0, f"{name}: OpenSSL alone would accept this signature")
+                self.assert_rejected(self.bundle, key=public, reason="unsupported key algorithm")
+                self.assert_rejected(self.bundle, "--revision-unchecked", key=public, revision=None,
+                                     reason="unsupported key algorithm")
 
     def test_wrong_and_co_delivered_keys(self):
         self.assert_rejected(self.bundle, key=self.attacker_public, reason="signature invalid")
@@ -304,19 +393,42 @@ class Workflow(Fixture):
         self.published.mkdir()
         self.output = self.published/"brigalow-operator"
 
-    def release(self, mode="sign", *extra, timeout="30", token="generated-test-token"):
+    def command(self, mode="sign", *extra, timeout="30", token="generated-test-token", revision="fixture"):
         env = dict(os.environ, FAKE_BRIG_MODE=mode, FAKE_BRIG_CALLS=str(self.calls), FAKE_BRIG_KEY=str(self.key),
-                   FAKE_BRIG_WRONG_KEY=str(self.attacker_key), FAKE_BRIG_COLLIDE=str(self.output))
+                   FAKE_BRIG_WRONG_KEY=str(self.attacker_key), FAKE_BRIG_COLLIDE=str(self.output),
+                   FAKE_BRIG_PID=str(self.root/"brig.pid"))
         env.pop("BRIGALOW_TOKEN", None)
         if token:
             env["BRIGALOW_TOKEN"] = token
+        if revision == "fixture" and "--expected-revision" not in extra:
+            extra = ("--expected-revision", self.commit, *extra)
         command = WORKFLOW + ["--binaries", str(self.binaries), "--output", str(self.output),
                               "--public-key", str(self.public), "--source", str(self.source),
                               "--brig", str(self.brig), "--server", "https://brigalow.invalid",
                               "--org", "00000000-0000-4000-8000-000000000001",
                               "--project", "00000000-0000-4000-8000-000000000002",
                               "--policy", "release", "--timeout", timeout, *extra]
+        return command, env
+
+    def release(self, mode="sign", *extra, **kwargs):
+        command, env = self.command(mode, *extra, **kwargs)
         return subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
+
+    def staging(self):
+        return [p for p in self.published.iterdir() if p.name.startswith(".brigalow-operator-")]
+
+    def wait_for(self, path, timeout=60):
+        deadline = time.monotonic() + timeout
+        while not path.exists():
+            self.assertLess(time.monotonic(), deadline, f"{path.name} never appeared")
+            time.sleep(0.05)
+
+    def alive(self, pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
 
     def call_count(self):
         return len(self.calls.read_text().splitlines())
@@ -336,7 +448,10 @@ class Workflow(Fixture):
                               "--expected-key-sha256", spki_sha256(self.public))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.call_count(), 1)
+        # brig is told to poll longer than --timeout (30 s), so the workflow's deadline fires first.
+        self.assertEqual(self.calls.read_text(), "call --wait 90\n")
         self.assertRegex(result.stderr, r"Brigalow request ID: [0-9a-f-]{36}")
+        self.assertNotIn("leftover staging", result.stderr)
         self.assertEqual(sorted(os.listdir(self.output)), sorted(["manifest.json", "manifest.sig", ARCHIVE, SBOM]))
         manifest = json.loads((self.output/"manifest.json").read_text())
         self.assertEqual((manifest["version"], manifest["trust"], manifest["source_commit"]), (2, "operator", self.commit))
@@ -344,6 +459,108 @@ class Workflow(Fixture):
         self.assertEqual(verified.returncode, 0, verified.stderr)
         self.assert_rejected(self.output, mode="lab")
         self.assertEqual([p.name for p in self.published.iterdir()], [self.output.name])
+        self.assertEqual(self.output.stat().st_mode & 0o777, 0o755)
+        for name in os.listdir(self.output):
+            self.assertEqual((self.output/name).stat().st_mode & 0o777, 0o444, name)
+
+    def test_rsa3072_operator_release(self):
+        self.key, self.public = keypair(self.root, "operator-rsa", RSA3072)
+        result = self.release("sign", "--expected-key-sha256", spki_sha256(self.public))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.call_count(), 1)
+        self.assertEqual(self.verify(self.output).returncode, 0)
+
+    def test_unsupported_pinned_key_refused_before_submission(self):
+        for name in ["RSA-2048", "P-384", "Ed25519"]:
+            with self.subTest(key=name):
+                _, self.public = keypair(self.root, f"workflow-{name}", UNSUPPORTED[name])
+                result = self.release()
+                self.assert_failed(result, calls=0, request=False)
+                self.assertIn("unsupported key algorithm", result.stderr)
+
+    def test_expected_revision_required_before_any_submission(self):
+        result = self.release(revision=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--expected-revision", result.stderr)
+        self.assertEqual(self.call_count(), 0)
+        self.assertEqual(os.listdir(self.published), [])
+        # The verifier's waiver is not a workflow option.
+        result = self.release("sign", "--revision-unchecked", revision=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.call_count(), 0)
+
+    def test_brig_poll_deadline_is_uncertain_not_a_plain_failure(self):
+        result = self.release("pending")
+        self.assert_failed(result, calls=1)
+        self.assertIn("outcome uncertain", result.stderr)
+        self.assertNotIn("brig signing failed", result.stderr)
+        self.assertIn("do not resubmit blindly", result.stderr)
+
+    def test_sigkill_after_signature_lands_publishes_nothing(self):
+        result = self.release("kill-parent")
+        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+        self.assertEqual(self.call_count(), 1)
+        self.assertFalse(os.path.lexists(self.output))
+        # SIGKILL cannot be handled: staging, holding the signature, is left for the operator.
+        leftovers = self.staging()
+        self.assertEqual(len(leftovers), 1)
+        self.assertTrue((leftovers[0]/"signing"/"manifest.sig").is_file())
+        # The next run warns about it, never deletes it and never treats it as output.
+        result = self.release("deny")
+        self.assertIn(f"leftover staging directory {leftovers[0].name}", result.stderr)
+        self.assertEqual(self.staging(), leftovers)
+        self.assertTrue((leftovers[0]/"signing"/"manifest.sig").is_file())
+        self.assertFalse(os.path.lexists(self.output))
+
+    def test_leftover_staging_warns_and_is_kept(self):
+        leftover = self.published/".brigalow-operator-0123456789abcdef"
+        (leftover/"bundle").mkdir(parents=True)
+        (leftover/"bundle"/"evidence").write_text("from an interrupted run")
+        result = self.release()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("warning: leftover staging directory .brigalow-operator-0123456789abcdef", result.stderr)
+        self.assertEqual((leftover/"bundle"/"evidence").read_text(), "from an interrupted run")
+        self.assertEqual(sorted(p.name for p in self.published.iterdir()), sorted([leftover.name, self.output.name]))
+
+    def test_signals_reap_brig_remove_staging_and_report_request(self):
+        for number in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
+            with self.subTest(signal=number.name):
+                pid_file = self.root/"brig.pid"
+                for path in [pid_file, pathlib.Path(f"{pid_file}.terminated")]:
+                    path.unlink(missing_ok=True)
+                command, env = self.command("hang", timeout="120")
+                process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    self.wait_for(pid_file)
+                    brig = int(pid_file.read_text())
+                    self.assertEqual(len(self.staging()), 1)
+                    process.send_signal(number)
+                    stdout, stderr = process.communicate(timeout=60)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                self.assertEqual(process.returncode, 1, stderr)
+                self.assertIn(f"interrupted by {number.name}", stderr)
+                self.assertIn("outcome is uncertain", stderr)
+                self.assertRegex(stderr, r"Query request [0-9a-f-]{36} on the Brigalow server")
+                self.assertEqual(pathlib.Path(f"{pid_file}.terminated").read_text(), str(int(signal.SIGTERM)),
+                                 "brig must be terminated, not left polling")
+                self.assertFalse(self.alive(brig), "brig must be reaped")
+                self.assertEqual(self.staging(), [], "staging must be removed")
+                self.assertFalse(os.path.lexists(self.output))
+                self.assertNotIn("Published", stdout)
+
+    def test_symlinked_output_parent_refused(self):
+        real = self.root/"real-parent"
+        real.mkdir()
+        link = self.root/"linked-parent"
+        os.symlink(real, link)
+        self.output = link/"brigalow-operator"
+        result = self.release()
+        self.assert_failed(result, calls=0, request=False)
+        self.assertIn("symlink", result.stderr)
+        self.assertEqual(os.listdir(real), [])
 
     def test_existing_output_is_never_touched(self):
         self.output.mkdir()
@@ -381,6 +598,7 @@ class Workflow(Fixture):
     def test_revision_and_checkout_guards_run_before_submission(self):
         self.assert_failed(self.release("sign", "--expected-revision", "b" * 40), calls=0, request=False)
         self.assert_failed(self.release("sign", "--expected-revision", "HEAD"), calls=0, request=False)
+        self.assertEqual(self.staging(), [])
         (self.source/"LICENSE").write_text("uncommitted change\n")
         self.assert_failed(self.release(), calls=0, request=False)
         self.assertFalse(os.path.lexists(self.output))
@@ -401,11 +619,11 @@ class Workflow(Fixture):
     def test_unusable_publication_refused_before_submission(self):
         import operator_release
         original = operator_release.publish_no_replace
-        def unsupported(source, target):
+        def unsupported(source_fd, source, target_fd, target):
             raise Failed("no atomic no-replace rename primitive on this platform; refusing to publish")
         operator_release.publish_no_replace = unsupported
         try:
-            args = type("Args", (), dict(output=self.output, expected_revision=None, public_key=self.public,
+            args = type("Args", (), dict(output=self.output, expected_revision=self.commit, public_key=self.public,
                                          source=self.source, binaries=self.binaries))()
             os.environ["BRIGALOW_TOKEN"] = "generated-test-token"
             with self.assertRaises(Failed):
@@ -421,11 +639,15 @@ class Workflow(Fixture):
         source, target = self.root/"staged", self.root/"target"
         source.mkdir()
         target.mkdir()  # A plain rename(2) would silently replace this empty directory.
-        with self.assertRaises(Failed):
-            publish_no_replace(source, target)
-        self.assertTrue(source.is_dir() and target.is_dir())
-        target.rmdir()
-        publish_no_replace(source, target)
+        root = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with self.assertRaises(Failed):
+                publish_no_replace(root, "staged", root, "target")
+            self.assertTrue(source.is_dir() and target.is_dir())
+            target.rmdir()
+            publish_no_replace(root, "staged", root, "target")
+        finally:
+            os.close(root)
         self.assertFalse(source.exists())
         self.assertTrue(target.is_dir())
 

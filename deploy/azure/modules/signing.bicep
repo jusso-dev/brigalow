@@ -9,7 +9,8 @@ param accountName string
 param profileName string
 @allowed(['Basic', 'Premium'])
 param sku string
-@allowed(['PrivateTrust', 'PrivateTrustCIPolicy', 'PublicTrust', 'PublicTrustTest', 'VBSEnclave'])
+// No PrivateTrustCIPolicy: it carries no code-signing EKU, which Brigalow requires.
+@allowed(['PrivateTrust', 'PublicTrust', 'PublicTrustTest', 'VBSEnclave'])
 param profileType string
 @description('Identity validation ID from the portal. It cannot be created through ARM.')
 param identityValidationId string

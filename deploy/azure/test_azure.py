@@ -198,6 +198,22 @@ class Template(unittest.TestCase):
                      "tlsCertificatePem", "tlsPrivateKeyPem"]:
             self.assertEqual(template["parameters"][name]["type"], "securestring", name)
 
+    def test_profile_types_exclude_ci_policy(self):
+        # PrivateTrustCIPolicy certificates carry no code-signing EKU, so Brigalow refuses them.
+        for path in ["main.bicep", "modules/signing.bicep"]:
+            allowed = [line for line in (HERE / path).read_text().splitlines() if line.startswith("@allowed(['PrivateTrust'")]
+            self.assertEqual(len(allowed), 1, path)
+            self.assertNotIn("PrivateTrustCIPolicy", allowed[0], path)
+        if shutil.which("az") is None:
+            self.skipTest("az CLI not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "main.json"
+            subprocess.run(["az", "bicep", "build", "--file", str(HERE / "main.bicep"), "--outfile", str(out)],
+                           check=True, capture_output=True)
+            template = json.loads(out.read_text())
+        allowed = template["parameters"]["certificateProfileType"]["allowedValues"]
+        self.assertEqual(sorted(allowed), ["PrivateTrust", "PublicTrust", "PublicTrustTest", "VBSEnclave"])
+
     def test_example_parameters_hold_no_secrets(self):
         text = (HERE / "main.bicepparam.example").read_text()
         self.assertIn("getSecret(", text)

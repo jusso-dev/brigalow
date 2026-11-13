@@ -88,7 +88,9 @@ param certificateProfileName string
 @allowed(['Basic', 'Premium'])
 param signingSku string = 'Basic'
 
-@allowed(['PrivateTrust', 'PrivateTrustCIPolicy', 'PublicTrust', 'PublicTrustTest', 'VBSEnclave'])
+// PrivateTrustCIPolicy is omitted on purpose: Microsoft issues those certificates without the
+// code-signing EKU, so Brigalow's leaf checks would refuse every result.
+@allowed(['PrivateTrust', 'PublicTrust', 'PublicTrustTest', 'VBSEnclave'])
 param certificateProfileType string
 
 @description('Identity validation ID from the Azure portal. ARM cannot create it.')

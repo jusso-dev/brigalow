@@ -3,6 +3,8 @@
 // resources; see deploy/azure/README.md. No HA: one VM, one server process.
 targetScope = 'resourceGroup'
 
+import { tsaSection } from 'tsa.bicep'
+
 @description('Azure region for all resources.')
 param location string = resourceGroup().location
 
@@ -15,13 +17,13 @@ param prefix string = 'brigalow'
 @description('Reviewed Brigalow production image pinned by digest, e.g. registry/brigalow@sha256:<64 hex>.')
 param image string
 
-@description('CIDR allowed to reach the TLS proxy on 443. Use your CI egress and admin ranges.')
+@description('One CIDR allowed to reach the TLS proxy on 443. Use a single range covering your CI egress and admin hosts.')
 param httpsSourceCidr string
 
-@description('Open SSH (22) in the NSG. Off by default; prefer Azure Bastion or serial console.')
+@description('Open SSH (22) in the NSG from sshSourceCidr. Off by default. This template creates no Bastion subnet and enables no serial console; use Run Command or a time-boxed SSH rule.')
 param enableSsh bool = false
 
-@description('CIDR for SSH when enableSsh is true. Ignored otherwise.')
+@description('One CIDR for SSH when enableSsh is true. Ignored otherwise.')
 param sshSourceCidr string = '127.0.0.1/32'
 
 @description('SSH public key for the VM admin user. Not a secret.')
@@ -76,6 +78,16 @@ param artifactSigningBindings array = []
 @description('Base64 DER of the pinned Artifact Signing issuing root, or "-" until you have reviewed it.')
 param artifactSigningRootDerBase64 string = '-'
 
+// ----- Optional RFC 3161 TSA (off by default) -----
+@description('HTTPS RFC 3161 TSA URL, or empty for no [tsa] section (timestamps unavailable). HTTP URLs are refused.')
+param tsaUrl string = ''
+
+@description('Base64 DER of the pinned TSA signer certificate, or "-" when tsaUrl is empty.')
+param tsaSignerDerBase64 string = '-'
+
+@description('Base64 DER of the CA certificate the TSA signer chains to, or "-" when tsaUrl is empty.')
+param tsaAnchorDerBase64 string = '-'
+
 // ----- Artifact Signing -----
 @minLength(3)
 @maxLength(24)
@@ -88,13 +100,15 @@ param certificateProfileName string
 @allowed(['Basic', 'Premium'])
 param signingSku string = 'Basic'
 
-@allowed(['PrivateTrust', 'PrivateTrustCIPolicy', 'PublicTrust', 'PublicTrustTest', 'VBSEnclave'])
+// PrivateTrustCIPolicy is omitted on purpose: Microsoft issues those certificates without the
+// code-signing EKU, so Brigalow's leaf checks would refuse every result.
+@allowed(['PrivateTrust', 'PublicTrust', 'PublicTrustTest', 'VBSEnclave'])
 param certificateProfileType string
 
 @description('Identity validation ID from the Azure portal. ARM cannot create it.')
 param identityValidationId string
 
-@description('Artifact Signing data-plane endpoint for this region, e.g. https://eus.codesigning.azure.net.')
+@description('Artifact Signing data-plane endpoint for this region, e.g. https://eus.codesigning.azure.net. Brigalow accepts only *.codesigning.azure.net.')
 param signingEndpoint string
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
@@ -143,6 +157,7 @@ module signing 'modules/signing.bicep' = {
 }
 
 var anchorLines = artifactSigningRootDerBase64 == '-' ? '' : '[[trust_anchors]]\nname = "artifact-signing-root"\ntier = "external-ca"\nfile = "/run/brigalow/artifact-signing-root.der"\n\n'
+var tsaLines = tsaSection(tsaUrl, tsaSignerDerBase64, tsaAnchorDerBase64)
 var bindingLines = join(map(artifactSigningBindings, b => '[[artifact_signing.bindings]]\nid = "${b.id}"\norg = "${b.org}"\nproject = "${b.project}"\npurpose = "${b.purpose}"\naccount = "${b.account}"\nprofile = "${b.profile}"\nanchor = "artifact-signing-root"\nprofile_eku = "${b.profileEku}"\n'), '\n')
 
 // Runtime configuration only: restricted login, secret file paths, no owner credentials.
@@ -161,13 +176,13 @@ db_password_file = "/run/brigalow/db-password"
 [login_keys]
 active = {{ id = "k1", file = "/run/brigalow/login-key" }}
 
-{1}[artifact_signing]
+{1}{5}[artifact_signing]
 endpoint = "{2}"
 managed_identity_client_id = "{3}"
 operation_timeout_seconds = 20
 
 {4}'''
-var configToml = format(configTemplate, postgres.outputs.fqdn, anchorLines, signingEndpoint, identity.properties.clientId, bindingLines)
+var configToml = format(configTemplate, postgres.outputs.fqdn, anchorLines, signingEndpoint, identity.properties.clientId, bindingLines, tsaLines)
 
 var identityJson = string({
   public_url: publicUrl
@@ -190,6 +205,8 @@ module keyvault 'modules/keyvault.bicep' = {
     configToml: configToml
     identityJson: identityJson
     artifactSigningRootDerBase64: artifactSigningRootDerBase64
+    tsaSignerDerBase64: tsaSignerDerBase64
+    tsaAnchorDerBase64: tsaAnchorDerBase64
   }
 }
 

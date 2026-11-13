@@ -5,9 +5,11 @@ using './main.bicep'
 
 param prefix = 'brigalow'
 param image = 'REGISTRY.example/brigalow@sha256:REPLACE_WITH_REVIEWED_64_HEX_DIGEST'
-// REQUIRED: replace with the egress ranges of your CI runners and staff networks. The value
-// below is a documentation-only range (RFC 5737) that matches no real client.
+// REQUIRED: replace with ONE CIDR covering your CI runners and staff networks. The NSG rule takes
+// a single source prefix, so GitHub-hosted runners cannot be admitted this way. The value below is
+// a placeholder string, not a CIDR or a documentation range. Replace it before deploying.
 param httpsSourceCidr = 'REPLACE_WITH_CI_AND_ADMIN_EGRESS_CIDR'
+// Off by default. When true, sshSourceCidr (one CIDR, e.g. your own /32) may reach port 22.
 param enableSsh = false
 param sshPublicKey = 'ssh-ed25519 AAAA_REPLACE_WITH_PUBLIC_KEY operator@example'
 
@@ -42,9 +44,18 @@ param oidcAuthorities = [
 param artifactSigningBindings = []
 param artifactSigningRootDerBase64 = '-'
 
+// Optional HTTPS RFC 3161 TSA. Leave as below for no [tsa] section (timestamps unavailable; use
+// policy timestamp = "disabled"). To enable, set all three: an https:// URL and the base64 DER of
+// the pinned TSA signer and its CA. HTTP TSAs, including Microsoft's, are refused.
+param tsaUrl = ''
+param tsaSignerDerBase64 = '-'
+param tsaAnchorDerBase64 = '-'
+
 param signingAccountName = 'brigalowsigning'
 param certificateProfileName = 'brigalow-release'
 param signingSku = 'Basic'
+// PrivateTrust, PublicTrust, PublicTrustTest or VBSEnclave. It must match the validation type
+// (Private or Public). PrivateTrustCIPolicy is refused: it has no code-signing EKU.
 param certificateProfileType = 'PrivateTrust'
 param identityValidationId = '00000000-0000-0000-0000-000000000000'
 // Must match the resource group's region, or signing fails with 403. Example: East US uses eus.

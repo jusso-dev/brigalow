@@ -20,6 +20,8 @@ Postgres serialises budget decisions with the existing tenant audit lock; this p
 
 ## Signed audit checkpoints
 
+The [Azure reference](../deploy/azure/README.md) has no signed audit checkpoints. It configures no PKCS#11 HSM, so there is no audit key, and `brig audit verify` on its exports checks chain integrity only.
+
 Use a dedicated HSM audit key and operator configuration, separate from policy and CA issuer keys. The operator command uses the restricted normal application DB role and appends checkpoint records; it never updates/deletes audit entries. Do not register the audit key as a signing-policy key.
 
 ```sh

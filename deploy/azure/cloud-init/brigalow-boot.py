@@ -22,7 +22,7 @@ import urllib.request
 
 IMDS = "http://169.254.169.254/metadata/identity/oauth2/token"
 # New role assignments can take up to 10 minutes to apply. Retry reads for longer than that,
-# then stop. No read starts after the deadline. One read makes nine calls (one token, eight
+# then stop. No read starts after the deadline. One read makes eleven calls (one token, ten
 # secrets) with a 10-second socket timeout each; that timeout bounds each blocking step rather
 # than the whole call, so allow headroom when sizing the unit's TimeoutStartSec.
 SECRET_DEADLINE_SECONDS = 15 * 60
@@ -37,6 +37,8 @@ SECRETS = {
     "config": "brigalow-config-toml",
     "identity": "brigalow-identity-json",
     "anchor": "brigalow-artifact-signing-root",
+    "tsa_signer": "brigalow-tsa-signer",
+    "tsa_anchor": "brigalow-tsa-anchor",
     "db_password": "brigalow-db-runtime-password",
     "login_key": "brigalow-login-state-key",
     "tls_crt": "brigalow-tls-crt",
@@ -151,6 +153,13 @@ def materialise(values, run=RUN, server_uid=SERVER_UID, proxy_uid=PROXY_UID,
     anchor = values["anchor"].strip()
     if anchor != "-":
         private_file(config, "artifact-signing-root.der", base64.b64decode(anchor, validate=True), server_uid)
+    # Optional TSA trust material, "-" when no [tsa] section is configured. Both or neither.
+    tsa = {"tsa-signer.der": values["tsa_signer"].strip(), "tsa-anchor.der": values["tsa_anchor"].strip()}
+    if sum(value != "-" for value in tsa.values()) == 1:
+        raise ValueError("TSA signer and anchor must both be set or both be unset")
+    for name, value in tsa.items():
+        if value != "-":
+            private_file(config, name, base64.b64decode(value, validate=True), server_uid)
     private_file(tls, "tls.crt", values["tls_crt"], proxy_uid)
     private_file(tls, "tls.key", values["tls_key"], proxy_uid)
     return image, config, tls

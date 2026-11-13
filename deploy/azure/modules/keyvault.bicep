@@ -25,6 +25,10 @@ param configToml string
 param identityJson string
 @description('Base64 DER of the pinned Artifact Signing root, or "-" when not yet pinned.')
 param artifactSigningRootDerBase64 string
+@description('Base64 DER of the pinned TSA signer, or "-" when no TSA is configured.')
+param tsaSignerDerBase64 string
+@description('Base64 DER of the TSA signer\'s CA, or "-" when no TSA is configured.')
+param tsaAnchorDerBase64 string
 
 var vaultName = take('${prefix}kv${uniqueString(resourceGroup().id)}', 24)
 // Built-in role "Key Vault Secrets User": read secret values only.
@@ -60,6 +64,8 @@ var secrets = [
   { name: 'brigalow-config-toml', value: configToml }
   { name: 'brigalow-identity-json', value: identityJson }
   { name: 'brigalow-artifact-signing-root', value: artifactSigningRootDerBase64 }
+  { name: 'brigalow-tsa-signer', value: tsaSignerDerBase64 }
+  { name: 'brigalow-tsa-anchor', value: tsaAnchorDerBase64 }
 ]
 
 resource secret 'Microsoft.KeyVault/vaults/secrets@2024-11-01' = [for item in secrets: {

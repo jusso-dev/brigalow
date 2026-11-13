@@ -207,20 +207,30 @@ def build(path):
 
 
 def tsa_section(url, signer, anchor):
-    """Evaluate tsa.bicep's tsaSection offline with `az bicep build-params`. Returns (ok, text)."""
+    """Evaluate tsa.bicep's pure tsaProblem/tsaRender offline with `az bicep build-params`.
+
+    Returns (ok, text): (True, section) when valid, (False, reason) when refused. main.bicep's
+    tsaSection fails the deployment exactly when tsaProblem is non-empty; test_tsa_section_wiring
+    checks that wiring. Bicep 0.49+ refuses fail() in a .bicepparam file (BCP452), so the test
+    cannot call tsaSection itself.
+    """
     def literal(value):
         return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    args = f"{literal(url)}, {literal(signer)}, {literal(anchor)}"
     # Bicep imports must be relative, so the scratch file sits beside tsa.bicep and is removed after.
     with tempfile.TemporaryDirectory(dir=HERE, prefix=".test-") as directory:
         params = Path(directory) / "t.bicepparam"
-        params.write_text("using none\nimport { tsaSection } from '../tsa.bicep'\n"
-                          f"param section = tsaSection({literal(url)}, {literal(signer)}, {literal(anchor)})\n")
+        params.write_text("using none\nimport { tsaProblem, tsaRender } from '../tsa.bicep'\n"
+                          f"param problem = tsaProblem({args})\n"
+                          f"param section = tsaRender({literal(url)})\n")
         result = subprocess.run(["az", "bicep", "build-params", "--file", str(params), "--stdout"],
                                 capture_output=True, text=True)
     if result.returncode != 0 or "Error" in result.stderr:
-        return False, result.stderr
-    built = json.loads(json.loads(result.stdout)["parametersJson"])
-    return True, built["parameters"]["section"]["value"]
+        raise AssertionError(result.stderr)
+    built = json.loads(json.loads(result.stdout)["parametersJson"])["parameters"]
+    if built["problem"]["value"]:
+        return False, built["problem"]["value"]
+    return True, built["section"]["value"]
 
 
 class Template(unittest.TestCase):
@@ -278,6 +288,20 @@ class Template(unittest.TestCase):
                      ("https://tsa.example.invalid/a b", "MA==", "MA==")]:
             ok, _ = tsa_section(*args)
             self.assertFalse(ok, args)
+
+    def test_tsa_section_wiring(self):
+        # tsaSection must fail the deployment on any tsaProblem and otherwise render tsaRender,
+        # and main.bicep must use tsaSection (not the non-failing helpers).
+        text = (HERE / "tsa.bicep").read_text()
+        section = text[text.index("func tsaSection("):]
+        self.assertIn("empty(tsaProblem(url, signerDerBase64, anchorDerBase64))", section)
+        self.assertIn("? tsaRender(url)", section)
+        self.assertIn(": fail(tsaProblem(url, signerDerBase64, anchorDerBase64))", section)
+        code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+        self.assertEqual(code.count("fail("), 1)
+        main = (HERE / "main.bicep").read_text()
+        self.assertIn("var tsaLines = tsaSection(tsaUrl, tsaSignerDerBase64, tsaAnchorDerBase64)", main)
+        self.assertNotIn("tsaRender(", main)
 
     def test_example_parameters_hold_no_secrets(self):
         text = (HERE / "main.bicepparam.example").read_text()

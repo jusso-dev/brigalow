@@ -1,1 +1,37 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Brigalow</title></head><body><main><h1>Brigalow</h1>{% if lab %}<p role="status">LAB MODE — test use only. Release signing unavailable.</p>{% endif %}<p>Manage projects, keys and signing requests.</p><p><a href="/orgs/{{ org }}/requests">Pending signing requests</a></p>{% if can_manage %}<form method="post" action="/orgs/{{ org }}/projects"><input type="hidden" name="csrf" value="{{ csrf }}"><label>Project name <input name="name" required maxlength="200"></label><input type="hidden" name="request_id" value="{{ request_id }}"><button type="submit">Create project</button></form>{% endif %}<form method="post" action="/orgs/{{ org }}/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Sign out</button></form></main></body></html>
+{% extends "base.html" %}
+{% block title %}Overview · Brigalow{% endblock %}
+{% block home %}/orgs/{{ org }}{% endblock %}
+{% block org %}<span class="masthead__org" title="Organisation">Org {{ org }}</span>{% endblock %}
+{% block nav %}{% let section = "home" %}{% include "nav.html" %}<form method="post" action="/orgs/{{ org }}/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn btn--quiet" type="submit">Sign out</button></form>{% endblock %}
+{% block banner %}{% include "lab.html" %}{% endblock %}
+{% block content %}
+<div class="page-head">
+<span class="eyebrow">Organisation overview</span>
+<h1>Signing control plane</h1>
+<p class="lede">Manage projects, keys and signing requests. Build systems send a digest; policy, approvals and the HSM decide what gets signed.</p>
+</div>
+<div class="home-grid">
+<div class="stack">
+<a class="queue-link" href="/orgs/{{ org }}/requests"><span class="eyebrow">Review queue</span><strong>Pending signing requests</strong><span>Open each request to check its digest, verified identity and policy before you decide. <span class="arrow" aria-hidden="true">-&gt;</span></span></a>
+{% if can_manage %}
+<form class="panel" method="post" action="/orgs/{{ org }}/projects">
+<div class="panel__head"><h2>Create a project</h2><span class="eyebrow">Project admin</span></div>
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="field"><label for="project-name">Project name</label><input class="input" id="project-name" name="name" required maxlength="200" autocomplete="off" placeholder="payments-service"><span class="field__hint">Up to 200 characters. Keys and policies are added through the API.</span></div>
+<input type="hidden" name="request_id" value="{{ request_id }}">
+<div><button class="btn btn--primary" type="submit">Create project</button></div>
+</form>
+{% endif %}
+</div>
+<aside class="panel panel--tinted" aria-labelledby="rules-head">
+<h2 id="rules-head">How this server signs</h2>
+<ol class="rules">
+<li><span class="n">01</span><span><b>Digests only.</b> Artifacts stay on the build machine.</span></li>
+<li><span class="n">02</span><span><b>Verified identity.</b> OIDC for people, workload tokens for CI jobs.</span></li>
+<li><span class="n">03</span><span><b>Policy and approvals.</b> One deny rejects; requesters and custodians cannot approve.</span></li>
+<li><span class="n">04</span><span><b>Keys stay in the HSM.</b> No export path, no software fallback.</span></li>
+<li><span class="n">05</span><span><b>Hash-chained audit.</b> Verify an export offline with <code>brig audit verify</code>.</span></li>
+</ol>
+</aside>
+</div>
+{% endblock %}

@@ -1,1 +1,20 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Pending requests — Brigalow</title></head><body><main><h1>Pending signing requests</h1>{% if lab %}<p>LAB MODE — test use only.</p>{% endif %}<p>Open each request to review its digest, identity and policy before deciding.</p><ul>{% for (id, name) in requests %}<li><a href="/orgs/{{ org }}/requests/{{ id }}">{{ name }}</a></li>{% endfor %}</ul><p><a href="/orgs/{{ org }}">Organisation</a></p></main></body></html>
+{% extends "base.html" %}
+{% block title %}Pending requests · Brigalow{% endblock %}
+{% block home %}/orgs/{{ org }}{% endblock %}
+{% block org %}<span class="masthead__org" title="Organisation">Org {{ org }}</span>{% endblock %}
+{% block nav %}{% let section = "requests" %}{% include "nav.html" %}{% endblock %}
+{% block banner %}{% include "lab.html" %}{% endblock %}
+{% block content %}
+<div class="page-head">
+<span class="eyebrow">Review queue</span>
+<h1>Pending signing requests</h1>
+<p class="lede">Open each request to review its digest, identity and policy before deciding. There is no bulk approval.</p>
+</div>
+{% if requests.is_empty() %}
+<div class="empty"><strong>Nothing is waiting for a decision.</strong><p>New requests appear here when a policy requires approval. Approval notifications, if configured, link straight to the request.</p></div>
+{% else %}
+<ul class="queue">
+{% for (id, name) in requests %}<li><a href="/orgs/{{ org }}/requests/{{ id }}"><span class="queue__name">{{ name }}</span><span class="queue__id">{{ id }}</span><span class="queue__go">Review</span></a></li>
+{% endfor %}</ul>
+{% endif %}
+{% endblock %}

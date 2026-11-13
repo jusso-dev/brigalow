@@ -6,7 +6,44 @@
 
 Open-source, self-hosted signing control plane. Build systems send a digest; Brigalow checks who is asking and whether policy allows it, has a key in an HSM sign it, and keeps a tamper-evident record.
 
-> **Status: implementation spans Phases 0–9; phase issues track local and hosted acceptance gates.** Implemented: OIDC/RBAC, tenant isolation, HSM/lab key custody, digest signing and CMS/timestamps, approvals, release windows, gates, provenance, native-tool integrations, optional private CA, rate limits, signed audit checkpoints and recovery drills. Phase 9 adds a local CSC mock only. An Azure Artifact Signing backend is tested against a local mock only. See [phase issues](https://github.com/jusso-dev/brigalow/issues) for the authoritative completion evidence. This remains development software; no production deployment or real CA integration has been performed.
+> **Status, 13-11-2026: development software.** Phases 0–8 are implemented and pass the full local acceptance harness (Postgres, SoftHSM2, test IdP, TSA, OpenSSL and native tools) plus hosted CI. Nothing has been deployed to production, enrolled with a real CA or signed through a real Azure account. Treat it as a reviewed prototype, not a qualified service.
+
+## Where it stands
+
+| Area | State |
+| --- | --- |
+| Identity, RBAC and tenant isolation (OIDC, workload tokens, Postgres RLS) | Implemented and acceptance tested |
+| HSM key custody (PKCS#11), digest signing, CMS and RFC 3161 timestamps | Implemented; qualified against SoftHSM2 only, no vendor HSM yet |
+| Approvals, release windows, pre-sign gates, DSSE provenance | Implemented and acceptance tested |
+| Native tools (osslsigncode, jsign, cosign, GPG) and GitHub Actions | Implemented through the Brigalow PKCS#11 module |
+| Optional private CA, rate limits, signed audit checkpoints, backup and recovery drills | Implemented and acceptance tested |
+| Azure Artifact Signing backend and Bicep reference deployment | Tested against a local mock and offline Bicep checks; [first real deployment runbook](docs/runbooks/azure-first-deployment.md) not yet exercised |
+| Operator release signing (v2 manifest, strict verifier) | Implemented with generated keys; no production HSM qualified, nothing published |
+| GitLab workload identity | Test-purpose policies only, pending real GitLab token shapes |
+| Stranded-request resolution and fencing | Design under review ([plan 006](plans/006-fencing-and-resolution.md)); read-only inspection only today |
+| High availability | Shared login state done; one replica enforced until fencing lands |
+
+The [plans index](plans/README.md) records what each slice delivered, what is blocked and why. [ROADMAP.md](ROADMAP.md) has the phase plan.
+
+## The approval UI
+
+Server-rendered with askama and a vendored htmx, no Node build, no inline script or style, self-hosted fonts under a same-origin CSP. Screenshots come from a disposable lab server with generated keys and a test IdP.
+
+<table>
+<tr>
+<td width="62%"><img src="docs/assets/screenshots/request.png" alt="Signing request page: SHA-256 digest, policy, key and trust tier, verified CI identity claims, and an Approval panel with Approve and Deny buttons"></td>
+<td width="38%"><img src="docs/assets/screenshots/request-mobile.png" alt="The same signing request on a 390 pixel wide phone screen"></td>
+</tr>
+<tr>
+<td colspan="2"><sub>An approver sees exactly what will be signed: the digest, the bound key and its trust tier, and the identity claims the IdP verified. Unverified submitter metadata is labelled as such. Requesters and key custodians never get the decision buttons.</sub></td>
+</tr>
+</table>
+
+| Review queue | After one of two approvals |
+| --- | --- |
+| ![Pending signing requests queue listing three release artifacts](docs/assets/screenshots/queue.png) | ![A request with one recorded approval; the panel shows the approver and says this person cannot decide again](docs/assets/screenshots/request-decided.png) |
+
+![Organisation overview with the review queue, a create project form and the five signing rules](docs/assets/screenshots/overview.png)
 
 ## Quick start
 
@@ -39,7 +76,7 @@ az deployment group create --resource-group <rg> \
   --template-file deploy/azure/main.bicep --parameters deploy/azure/main.bicepparam
 ```
 
-The first boot is expected to show a failed server and no `/healthz`: the server cannot start until bootstrap creates its database login. Then, as separate owner steps from a temporary admin VM in the template's `vm` subnet (the only subnet the database admits): `brigalow-admin migrate`, create the restricted runtime login, `brigalow-admin org-create --org <uuid> --name <name>`. Sign in, create a project, pin the profile's reviewed root and EKU, redeploy with the key binding, and register it as a custodian (`{"remote_key":"<uuid>","algorithm":"rsa3072","purpose":"release","offline":false}`). Create a policy, then sign from CI:
+Follow the [first-deployment runbook](docs/runbooks/azure-first-deployment.md) for the whole sequence, including clean-up. The first boot is expected to show a failed server and no `/healthz`: the server cannot start until bootstrap creates its database login. Then, as separate owner steps from a temporary admin VM in the template's `vm` subnet (the only subnet the database admits): `brigalow-admin migrate`, create the restricted runtime login, `brigalow-admin org-create --org <uuid> --name <name>`. Sign in, create a project, pin the profile's reviewed root and EKU, redeploy with the key binding, and register it as a custodian (`{"remote_key":"<uuid>","algorithm":"rsa3072","purpose":"release","offline":false}`). Create a policy, then sign from CI:
 
 ```bash
 # BRIGALOW_TOKEN holds the CI job's workload OIDC token (audience brigalow:<org>), set by the CI
@@ -77,6 +114,9 @@ Brigalow's optional private CA supports self-hosted trust. Brigalow cannot act a
 | [docs/threat-model.md](docs/threat-model.md) | Assets, boundaries, threats, controls |
 | [docs/acceptance-tests.md](docs/acceptance-tests.md) | Executable acceptance tests per phase |
 | [ROADMAP.md](ROADMAP.md) | Phased plan |
+| [plans/](plans/README.md) | Direction plans, implementation outcomes and recorded decisions |
+| [docs/operations.md](docs/operations.md) | Credential budgets, checkpoints, recovery, release workflow |
+| [docs/runbooks/](docs/runbooks/azure-first-deployment.md) | First real Azure deployment, step by step |
 | [docs/decisions/](docs/decisions) | Licence, stack, trust tier decisions |
 
 ## Build
@@ -85,7 +125,7 @@ Requires stable Rust (CI uses the current stable release), OpenSSL, Python 3 and
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 # Use your explicitly selected local Docker context (e.g. orbstack on macOS).
 scripts/e2e.sh --context orbstack

@@ -1,1 +1,21 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Project · Brigalow</title></head><body><main>{% if lab %}<p role="status">LAB MODE — test use only. Release signing unavailable.</p>{% endif %}<h1>{{ name }}</h1></main></body></html>
+{% extends "base.html" %}
+{% block title %}{{ name }} · Brigalow{% endblock %}
+{% block home %}/orgs/{{ org }}{% endblock %}
+{% block org %}<span class="masthead__org" title="Organisation">Org {{ org }}</span>{% endblock %}
+{% block nav %}{% let section = "project" %}{% include "nav.html" %}{% endblock %}
+{% block banner %}{% include "lab.html" %}{% endblock %}
+{% block content %}
+<div class="page-head">
+<span class="eyebrow">Project</span>
+<h1>{{ name }}</h1>
+<p class="lede">Project <code>{{ id }}</code>. Register keys, create policies and issue scoped API tokens through the JSON API.</p>
+</div>
+<div class="panel panel--tinted">
+<h2>Next steps</h2>
+<ol class="rules">
+<li><span class="n">01</span><span><b>Generate a key.</b> A key custodian posts to <code>/v1/orgs/{{ org }}/projects/{{ id }}/keys</code>.</span></li>
+<li><span class="n">02</span><span><b>Create a policy.</b> Bind the key, the allowed claims and any approval quorum.</span></li>
+<li><span class="n">03</span><span><b>Sign from CI.</b> Run <code>brig sign</code> with the job's workload token.</span></li>
+</ol>
+</div>
+{% endblock %}

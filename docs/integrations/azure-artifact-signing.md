@@ -14,7 +14,7 @@ Brigalow never labels a signature publicly trusted. A key registered through thi
 | Poll | `GET .../sign/{operationId}?api-version=2022-06-15-preview` until `status` is `Succeeded`. `InProgress` keeps polling, and any other value fails. |
 | Result | `signature` (base64) and `signingCertificate`, which is base64 of a base64 (or PEM) PKCS#7 or X.509 bundle. |
 | Token | Entra access token for resource `https://codesigning.azure.net`. The caller needs the built-in role **Artifact Signing Certificate Profile Signer** (role ID `2837e146-70d7-4cfd-ad55-7efa6464f958`, data action `Microsoft.CodeSigning/certificateProfiles/Sign/action`), scoped to the profile. |
-| Rotation | Microsoft renews the key and certificate daily, and each certificate is valid for 72 hours. The durable identity is a profile-specific EKU under `1.3.6.1.4.1.311.97.` plus code signing (`1.3.6.1.5.5.7.3.3`). |
+| Rotation | Microsoft renews the key and certificate daily, and each certificate is valid for 72 hours. The durable identity is a custom EKU under `1.3.6.1.4.1.311.97.` plus code signing (`1.3.6.1.5.5.7.3.3`). What that EKU identifies depends on the trust model; see [What the pinned EKU identifies](#what-the-pinned-eku-identifies). |
 
 ## Rotating-key contract
 
@@ -86,12 +86,24 @@ profile_eku = "1.3.6.1.4.1.311.97.000000000.0.0"  # your profile's EKU (placehol
 
 Rules enforced at startup (no fallback):
 
-- `endpoint` must be `https://<region>.codesigning.azure.net`, with a lowercase alphanumeric region, no port, path, query or userinfo. Lab mode alone may use a literal loopback HTTPS origin with `tls_ca_file`. Production refuses `tls_ca_file` and loopback.
+- `endpoint` must be `https://<region>.codesigning.azure.net`, with a lowercase alphanumeric region, no port, path, query or userinfo. Lab mode alone may use a literal loopback HTTPS origin with `tls_ca_file`. Production refuses `tls_ca_file` and loopback. Microsoft's `Az.ArtifactSigning` cmdlet reference also shows `https://<region>.artifactsigning.azure.net`, while its quickstart region table and CI policy how-to use `codesigning.azure.net`. Brigalow accepts only `codesigning.azure.net`, and will not add the other host until Microsoft documents it as a supported signing data plane. If Microsoft moves the data plane, this check refuses the new host and signing stops (fail closed) until Brigalow is updated.
 - `account` and `profile` follow the ARM name patterns (letters, digits, single hyphens). Each account and profile pair maps to exactly one Brigalow key.
 - `anchor` must name a configured `external-ca` anchor that parses as a CA certificate. `profile_eku` must be a canonical OID under `1.3.6.1.4.1.311.97.`. The shared EKUs `1.3.6.1.4.1.311.97.1.0` (on every Public Trust certificate) and the type prefixes `.1.3.1` and `.1.4.1` are refused: they do not identify one profile.
 - `backend = "artifact_signing"` is accepted in production mode, alongside `pkcs11`. Readiness (`/healthz`) checks that a managed-identity token is available and never signs.
 
-Obtaining the anchor and EKU is an operator step outside Brigalow. Microsoft's `Az.CodeSigning` PowerShell module provides `Get-AzCodeSigningRootCert` (root currently used by an account/profile) and `Get-AzCodeSigningCustomerEku` (the profile EKU). Convert the root to DER (`openssl x509 -in root.cer -outform DER -out root.der`) if needed. Cross-check both against an independent source, such as a leaf from a reviewed earlier signature or Microsoft's published root fingerprints, before pinning, and record them with the profile. Microsoft documents that a recreated profile receives a new EKU, so recreating a profile requires updating this binding. Microsoft can also change its issuing root. Brigalow then fails closed until you pin the new root after the same review.
+Obtaining the anchor and EKU is an operator step outside Brigalow. Microsoft's `Az.ArtifactSigning` PowerShell module (it replaced `Az.CodeSigning`) provides `Get-AzArtifactSigningCertificateRoot` (the root currently used by an account and profile, written to a `.cer` file) and `Get-AzArtifactSigningCustomerEku` (the customer EKU). Both take `-AccountName`, `-ProfileName` and `-EndpointUrl`. Microsoft's CI policy how-to lists the **Artifact Signing Certificate Profile Signer** role as a prerequisite for these cmdlets. That role can also sign with the profile, so grant it to the operator on the one profile for this step only, and remove it as soon as you have the values. Convert the root to DER (`openssl x509 -in root.cer -outform DER -out root.der`) if needed. Cross-check both against an independent source, such as a leaf from a reviewed earlier signature or Microsoft's published root fingerprints, before pinning, and record them with the profile. Microsoft can also change its issuing root. Brigalow then fails closed until you pin the new root after the same review.
+
+### What the pinned EKU identifies
+
+Microsoft's [certificate management page](https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management) is not consistent about this, so do not rely on the EKU alone to tell profiles apart:
+
+- **Public Trust:** the EKU suffix after `1.3.6.1.4.1.311.97.` identifies the certificate profile.
+- **Private Trust:** the same page says the suffix after `1.3.6.1.4.1.311.97.1.3.1.` is unique to the subscriber's **identity validation**. Two Private Trust profiles that use the same validation may then carry the same EKU.
+- The same page also says the EKU is associated with the profile, not the identity validation, and that a deleted and recreated profile gets a new EKU even with the same validation. That contradicts the Private Trust example.
+
+Brigalow does not depend on resolving this. Each binding pins the account, the profile and the issuing root as well as the EKU. Brigalow sends requests only to that account and profile, validates every result to the pinned root, and requires the EKU in the leaf. It also refuses the documented shared values (`.1.0`, and the bare `.1.3.1` and `.1.4.1` prefixes). If you recreate a profile, re-read the EKU with `Get-AzArtifactSigningCustomerEku` and update the binding, whichever statement turns out to hold.
+
+The Private Trust CI Policy profile type carries no code-signing EKU, so Brigalow refuses its certificates. The Azure reference template does not offer that type.
 
 ## Registration
 
@@ -109,7 +121,7 @@ Disable stops Brigalow's authority only. It does not revoke the role assignment,
 
 Microsoft's timestamp service is `http://timestamp.acs.microsoft.com`, which is HTTP only. Brigalow's TSA client accepts HTTPS only and this backend does not change that. Choose one:
 
-- Configure an HTTPS RFC 3161 TSA you trust (`[tsa]`, with a pinned signer) and set the policy `timestamp = "required"` (or `"optional"`).
+- Configure an HTTPS RFC 3161 TSA you trust (`[tsa]`, with a pinned signer) and set the policy `timestamp = "required"` (or `"optional"`). The [Azure reference](../../deploy/azure/README.md#timestamps) does this through `tsaUrl`, `tsaSignerDerBase64` and `tsaAnchorDerBase64`. It is off by default.
 - Set the policy `timestamp = "disabled"` (or `"optional"` with no TSA) and timestamp separately with a tool you trust.
 
 Plain consequence: each signing certificate is valid for 72 hours. Without a trusted timestamp, verifiers that check certificate validity at verification time reject the signature after that certificate expires, usually within three days of signing. A trusted timestamp is what lets a verifier accept it later. Whether a given platform accepts your chosen TSA is the platform's decision.

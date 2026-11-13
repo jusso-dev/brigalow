@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -35,6 +36,8 @@ def values(**overrides):
         "config": "mode = \"production\"\n",
         "identity": "{}",
         "anchor": "-",
+        "tsa_signer": "-",
+        "tsa_anchor": "-",
         "db_password": secrets.token_hex(16),
         "login_key": base64.b64encode(secrets.token_bytes(32)).decode(),
         "tls_crt": "certificate",
@@ -88,12 +91,30 @@ class Boot(unittest.TestCase):
         self.run_boot()
         self.assertFalse((config / "artifact-signing-root.der").exists())
 
+    def test_tsa_files_only_when_configured(self):
+        # Unset (the default): no TSA files, as before.
+        _, config, _ = self.run_boot()
+        self.assertFalse(any(p.name.startswith("tsa-") for p in config.iterdir()))
+        # Set: both DER files are written like every other secret file.
+        _, config, _ = self.run_boot(tsa_signer=base64.b64encode(b"\x30\x01").decode(),
+                                     tsa_anchor=base64.b64encode(b"\x30\x02").decode())
+        self.assertEqual((config / "tsa-signer.der").read_bytes(), b"\x30\x01")
+        self.assertEqual((config / "tsa-anchor.der").read_bytes(), b"\x30\x02")
+        for name in ["tsa-signer.der", "tsa-anchor.der"]:
+            file = config / name
+            self.assertTrue(stat.S_ISREG(file.lstat().st_mode))
+            self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+            self.assertEqual(self.owners[str(file)], 10001)
+
     def test_rejections(self):
         for overrides in [{"image": "example.invalid/brigalow:latest"},
                           {"image": "example.invalid/brigalow@sha256:bad"},
                           {"login_key": base64.b64encode(b"x" * 31).decode()},
                           {"login_key": "not base64!"},
-                          {"anchor": "not base64!"}]:
+                          {"anchor": "not base64!"},
+                          {"tsa_signer": "not base64!", "tsa_anchor": "MA=="},
+                          {"tsa_signer": "MA==", "tsa_anchor": "-"},
+                          {"tsa_signer": "-", "tsa_anchor": "MA=="}]:
             with self.assertRaises(Exception, msg=str(overrides)):
                 self.run_boot(**overrides)
         run = self.dir / "run"
@@ -145,7 +166,7 @@ class Boot(unittest.TestCase):
         self.assertLessEqual(clock[0], 900)
         self.assertGreaterEqual(clock[0], 600, "must allow at least 10 minutes for propagation")
         self.assertLessEqual(max(pauses), boot.SECRET_RETRY_MAX_PAUSE)
-        # Slow failures: each read takes the full 90 seconds of network timeouts. No read may
+        # Slow failures: each read takes 90 seconds of network timeouts. No read may
         # start at or after the deadline, so the phase ends within deadline + one read.
         clock[0], starts = 0.0, []
         def slow(*_):
@@ -177,15 +198,36 @@ class Boot(unittest.TestCase):
             boot.read_secrets("bad.name/../x", "client")
 
 
+def build(path):
+    with tempfile.TemporaryDirectory() as directory:
+        out = Path(directory) / "main.json"
+        subprocess.run(["az", "bicep", "build", "--file", str(path), "--outfile", str(out)],
+                       check=True, capture_output=True)
+        return json.loads(out.read_text())
+
+
+def tsa_section(url, signer, anchor):
+    """Evaluate tsa.bicep's tsaSection offline with `az bicep build-params`. Returns (ok, text)."""
+    def literal(value):
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    # Bicep imports must be relative, so the scratch file sits beside tsa.bicep and is removed after.
+    with tempfile.TemporaryDirectory(dir=HERE, prefix=".test-") as directory:
+        params = Path(directory) / "t.bicepparam"
+        params.write_text("using none\nimport { tsaSection } from '../tsa.bicep'\n"
+                          f"param section = tsaSection({literal(url)}, {literal(signer)}, {literal(anchor)})\n")
+        result = subprocess.run(["az", "bicep", "build-params", "--file", str(params), "--stdout"],
+                                capture_output=True, text=True)
+    if result.returncode != 0 or "Error" in result.stderr:
+        return False, result.stderr
+    built = json.loads(json.loads(result.stdout)["parametersJson"])
+    return True, built["parameters"]["section"]["value"]
+
+
 class Template(unittest.TestCase):
     def test_bicep_embeds_reviewed_production_files(self):
         if shutil.which("az") is None:
             self.skipTest("az CLI not installed")
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "main.json"
-            subprocess.run(["az", "bicep", "build", "--file", str(HERE / "main.bicep"), "--outfile", str(out)],
-                           check=True, capture_output=True)
-            text = out.read_text()
+        text = json.dumps(build(HERE / "main.bicep"))
         for path in ["deploy/production/compose.yml", "deploy/production/nginx.conf",
                      "scripts/production.py", "deploy/azure/cloud-init/brigalow-boot.py"]:
             self.assertIn(base64.b64encode((ROOT / path).read_bytes()).decode(), text, path)
@@ -206,13 +248,36 @@ class Template(unittest.TestCase):
             self.assertNotIn("PrivateTrustCIPolicy", allowed[0], path)
         if shutil.which("az") is None:
             self.skipTest("az CLI not installed")
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "main.json"
-            subprocess.run(["az", "bicep", "build", "--file", str(HERE / "main.bicep"), "--outfile", str(out)],
-                           check=True, capture_output=True)
-            template = json.loads(out.read_text())
+        template = build(HERE / "main.bicep")
         allowed = template["parameters"]["certificateProfileType"]["allowedValues"]
         self.assertEqual(sorted(allowed), ["PrivateTrust", "PublicTrust", "PublicTrustTest", "VBSEnclave"])
+        # The TSA is off unless the operator sets it.
+        self.assertEqual(template["parameters"]["tsaUrl"]["defaultValue"], "")
+        self.assertEqual(template["parameters"]["tsaSignerDerBase64"]["defaultValue"], "-")
+        self.assertEqual(template["parameters"]["tsaAnchorDerBase64"]["defaultValue"], "-")
+        self.assertIn("tsaSection", json.dumps(template["variables"]["tsaLines"]))
+
+    def test_tsa_section_unset_and_set(self):
+        if shutil.which("az") is None:
+            self.skipTest("az CLI not installed")
+        # Unset: no [tsa] section, so timestamps stay disabled.
+        self.assertEqual(tsa_section("", "-", "-"), (True, ""))
+        # Set: exactly the server's TsaConfig fields, pointing at the files brigalow-boot.py writes.
+        ok, text = tsa_section("https://tsa.example.invalid/rfc3161", "MA==", "MA==")
+        self.assertTrue(ok, text)
+        self.assertEqual(tomllib.loads(text), {"tsa": {
+            "url": "https://tsa.example.invalid/rfc3161",
+            "signer_file": "/run/brigalow/tsa-signer.der",
+            "anchors": ["/run/brigalow/tsa-anchor.der"]}})
+        # Refused: HTTP (Microsoft's TSA), half-configured, and values that would break the TOML.
+        for args in [("http://timestamp.acs.microsoft.com", "MA==", "MA=="),
+                     ("HTTP://tsa.example.invalid", "MA==", "MA=="),
+                     ("https://tsa.example.invalid", "-", "MA=="),
+                     ("https://tsa.example.invalid", "MA==", "-"),
+                     ("", "MA==", "-"),
+                     ("https://tsa.example.invalid/a b", "MA==", "MA==")]:
+            ok, _ = tsa_section(*args)
+            self.assertFalse(ok, args)
 
     def test_example_parameters_hold_no_secrets(self):
         text = (HERE / "main.bicepparam.example").read_text()

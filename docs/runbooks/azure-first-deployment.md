@@ -23,6 +23,8 @@ cd ~/brigalow-work
 umask 077   # every file created in this shell is 0600
 ```
 
+`~/brigalow-work` holds secret working files only. It is not a checkout. Run every repository command (`deploy/azure/...`, `git ...`) from the root of a separate clone at the commit you will deploy, written here as `<checkout>`, for example `cd <checkout> && cp deploy/azure/...`. Run secret-file commands in `~/brigalow-work`.
+
 - Generate secrets straight into files. Never type or paste a secret value as a command argument, an environment assignment or a heredoc.
 - If you must enter a value by hand, read it without echo: `read -rs NAME && export NAME`, then `unset NAME` when done.
 - To paste a value into a prompt (psql `\password`), copy it with `pbcopy < file` and clear the clipboard afterwards with `pbcopy < /dev/null`.
@@ -88,7 +90,7 @@ Microsoft decides identity validation. As read on 13-11-2026:
 - [ ] **Staff OIDC provider**: a public client with S256 PKCE, able to emit group claims ([identity setup](../development.md#identity-setup-phase-1)). You need two test accounts. User A is in an `org_admin` group only. User B is in a `key_custodian` group only. Brigalow refuses API token issuance by anyone holding `key_custodian`, and refuses submission by custodians.
 - [ ] **Your egress IP** as a single `/32`. The template takes one `httpsSourceCidr` and one `sshSourceCidr`.
 - [ ] **An SSH key pair** for the VM admin user and the temporary admin VM.
-- [ ] **Tools on your workstation:** a recent Azure CLI with Bicep (`az bicep version`), PowerShell 7 with `Az.Accounts` and `Az.ArtifactSigning` (7.2), **OpenSSL 3** (`openssl version` must print `OpenSSL 3.`; the macOS system `openssl` is LibreSSL and is not suitable), curl 7.55 or later, `jq`, `uuidgen`, and either a `brig` binary built from the same commit or Docker with a named context to run `brig` from `<image>`.
+- [ ] **Tools on your workstation:** a recent Azure CLI with Bicep (`az bicep version`), PowerShell 7 with `Az.Accounts` and `Az.ArtifactSigning` (7.2), **OpenSSL 3** (`openssl version` must print `OpenSSL 3.`; the macOS system `openssl` is LibreSSL and is not suitable), curl 7.76 or later (steps 6 and 9 use `--fail-with-body`), `jq`, `uuidgen`, and either a `brig` binary built from the same commit or Docker with a named context to run `brig` from `<image>`.
 - [ ] **Budget approval and a teardown date.**
 
 ### 0.4 Go/no-go
@@ -130,7 +132,8 @@ Identity validation can only be completed in the Azure portal, under an Artifact
   - If it fails: if the **New identity** button stays dimmed, the role is not yet effective or is missing.
 
 - [ ] **1.5 Submit the identity validation.**
-  - Do: on the account **Overview**, or under **Objects**, open **Identity validations** > **Organization** > **New Identity**. Choose **Private** (for `PrivateTrust`) or **Public** (for `PublicTrust`/`PublicTrustTest`). Fill in **New organization validation** exactly as your legal records show. Check **Certificate subject preview**, then select **Create**.
+  - Do, for an organisation: on the account **Overview**, or under **Objects**, open **Identity validations** > **Organization** > **New Identity**. Choose **Private** (for `PrivateTrust`) or **Public** (for `PublicTrust`/`PublicTrustTest`). Fill in **New organization validation** exactly as your legal records show. Check **Certificate subject preview**, then select **Create**.
+  - Do, for an eligible individual developer (United States or Canada only, see 0.2): open **Identity validations** > **Individual** > **New Identity**. Individuals can use **Public** validation only, so the profile type must be `PublicTrust` or `PublicTrustTest`. Complete Microsoft's individual verification as prompted, then select **Create**. Anyone else stops here (0.2).
   - Expect: status **In Progress**.
   - If it fails: the form rejects fields. Read Microsoft's field table in the quickstart. Details cannot be edited after creation. A correction needs a new request.
 
@@ -184,15 +187,15 @@ Secrets reach the template only as `az.getSecret` references to your operator va
     done
     ```
 
-  - Expect: five secret IDs (URLs) and no values.
-  - If it fails: you need secret write permission on the operator vault and network access to it. Keep `pg-owner-password` and `pg-runtime-password` locally until phase 5 is complete. Delete `login-state-key`, `tls.key` and `tls.crt` now.
+  - Expect: five secret IDs (URLs) and no values. Then delete `login-state-key`, `tls.key` and `tls.crt` from `~/brigalow-work` (`rm -P` on macOS, `shred -u` on Linux). Keep `pg-owner-password` and `pg-runtime-password` locally until phase 5 is complete.
+  - If it fails: you need secret write permission on the operator vault and network access to it. Fix that and rerun the loop. Do not leave the local copies in place once the upload succeeds.
 
 - [ ] **2.4 Choose identifiers and register the OIDC client.**
   - Do: create the organisation UUID with `uuidgen | tr '[:upper:]' '[:lower:]'` and record it as `<org>`. At your IdP, register the exact redirect `https://<host>/auth/<org>/staff/callback` (where `staff` is the authority name in the example). Create the groups `brigalow-admins` (user A) and `brigalow-custodians` (user B).
   - Expect: the IdP shows the redirect, and the groups are released in the ID token.
 
 - [ ] **2.5 Write `main.bicepparam`.**
-  - Do: `cp deploy/azure/main.bicepparam.example deploy/azure/main.bicepparam && chmod 0600 deploy/azure/main.bicepparam`. Then replace every placeholder:
+  - Do, from `<checkout>`: `cp deploy/azure/main.bicepparam.example deploy/azure/main.bicepparam && chmod 0600 deploy/azure/main.bicepparam`. Then replace every placeholder:
 
     | Parameter | Value for the first deployment |
     | --- | --- |
@@ -220,6 +223,7 @@ Secrets reach the template only as `az.getSecret` references to your operator va
   - Do:
 
     ```sh
+    cd <checkout>
     az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
     az bicep lint --file deploy/azure/main.bicep
     python3 deploy/azure/test_azure.py
@@ -240,6 +244,7 @@ Secrets reach the template only as `az.getSecret` references to your operator va
   - Do:
 
     ```sh
+    cd <checkout>
     az deployment group what-if --resource-group <resource-group> --name brigalow-first-01 \
       --template-file deploy/azure/main.bicep --parameters deploy/azure/main.bicepparam \
       > ~/brigalow-evidence/<date>/what-if-01.txt
@@ -447,6 +452,8 @@ This expands [README bootstrap](../../deploy/azure/README.md#bootstrap-separate-
 
 Brigalow validates every returned chain to **one** operator-pinned root, and requires the profile EKU in every leaf ([backend guide, Configuration](../integrations/azure-artifact-signing.md#configuration)). Get both through a channel independent of signing responses. A root copied from a returned bundle proves nothing on its own.
 
+**Every exit from this phase runs 7.6 first.** The temporary role in 7.1 lets you sign with the profile directly. Whenever a step below says stop, or you abandon or pause the phase for any reason, remove the assignment (7.6) and confirm the empty list before you stop. Record the removal in evidence.
+
 - [ ] **7.1 Grant yourself temporary signer access to the profile.** Microsoft's how-to lists **Artifact Signing Certificate Profile Signer** as a prerequisite for these cmdlets. While you hold it, you can sign with the profile, so record it and remove it in 7.6.
   - Do:
 
@@ -478,6 +485,7 @@ Brigalow validates every returned chain to **one** operator-pinned root, and req
     - **403:** the role from 7.1 is not effective yet. Wait, then reconnect.
     - **Endpoint refused:** the cmdlet reference examples use `https://<x>.artifactsigning.azure.net`, while the quickstart lists `codesigning.azure.net`. Try the other form for the cmdlet only. `signingEndpoint` must stay `codesigning.azure.net`, because the backend refuses any other host.
     - **Cmdlets will not run on macOS:** Microsoft's how-to lists Azure PowerShell on Windows. Use a Windows host you control.
+    - **Anything you cannot resolve now:** run 7.6 before you stop.
 
 - [ ] **7.3 Normalise the root to DER and inspect it.**
   - Do (OpenSSL 3, in `~/brigalow-work`):
@@ -493,13 +501,13 @@ Brigalow validates every returned chain to **one** operator-pinned root, and req
     ```
 
   - Expect: subject equals issuer, a Microsoft subject, `CA:TRUE`, certificate signing in key usage, currently valid, and `root.pem: OK`.
-  - If it fails: if the file is not a single self-signed CA certificate, stop. Do not pin an intermediate.
+  - If it fails: if the file is not a single self-signed CA certificate, run 7.6, then stop. Do not pin an intermediate.
 
 - [ ] **7.4 Verify the root out of band.**
-  - Do, for Public Trust profile types: download Microsoft's published root from `https://www.microsoft.com/pkiops/certs/microsoft%20identity%20verification%20root%20certificate%20authority%202020.crt`. Normalise it as in 7.3. Compare its SHA-1 with the value you read yourself in the [Microsoft PKI repository](https://www.microsoft.com/pkiops/docs/repository.htm) table, and `cmp` its DER with `root.der`. As read on 13-11-2026, the repository lists SHA-1 `f40042e2e5f7e8ef8189fed15519aece42c3bfa2` for "Microsoft Identity Verification Root Certificate Authority 2020". Use your own reading, not this copy.
+  - Do, for Public Trust profile types: download Microsoft's published root from `https://www.microsoft.com/pkiops/certs/microsoft%20identity%20verification%20root%20certificate%20authority%202020.crt`. Normalise it as in 7.3. Compare its SHA-1 with the value you read yourself in the [Microsoft PKI repository](https://www.microsoft.com/pkiops/docs/repository.htm) table, and `cmp` its DER with `root.der`. The published root does not cover the EKU, so also repeat the `Get-AzArtifactSigningCustomerEku` call from 7.2 on a second machine on a different network, with a separate sign-in session, and save it as `profile-eku-2.txt` for 7.5. As read on 13-11-2026, the repository lists SHA-1 `f40042e2e5f7e8ef8189fed15519aece42c3bfa2` for "Microsoft Identity Verification Root Certificate Authority 2020". Use your own reading, not this copy.
   - Do, for Private Trust: Microsoft states that the Private Trust CA hierarchy is not default-trusted in any root program. No published Private Trust root fingerprint was found on 13-11-2026. Repeat 7.2 and 7.3 from a second machine on a different network, with a separate sign-in session, and compare the SHA-256 fingerprints. If the subject is the 2020 Identity Verification root, also compare it with the repository value. Check Microsoft's current docs for published Private Trust material. Record that pinning rests on two independent authenticated retrievals.
   - Expect: identical DER from both sources.
-  - If it fails: on any mismatch, stop. Do not pin.
+  - If it fails: on any mismatch, run 7.6, then stop. Do not pin.
 
 - [ ] **7.5 Check the EKU.**
   - Do: read `profile-eku.txt`.
@@ -507,8 +515,8 @@ Brigalow validates every returned chain to **one** operator-pinned root, and req
     - It is a canonical OID (no empty arcs, no leading zeros, at most 128 characters) beginning `1.3.6.1.4.1.311.97.` with further arcs.
     - For `PrivateTrust` it begins `1.3.6.1.4.1.311.97.1.3.1.`. Microsoft describes that suffix as unique to the identity validation.
     - For Public Trust it is `1.3.6.1.4.1.311.97.` followed by profile-specific arcs.
-    - A second retrieval from 7.4's second machine gives the same value. If the portal shows the EKU for the profile or its certificates, compare it too. That display is unconfirmed, so check the current portal.
-  - If it fails: never pin a shared identifier. The backend refuses them at startup and the server will not start:
+    - The second retrieval from 7.4 (`profile-eku-2.txt` for Public Trust, the repeated 7.2 for Private Trust) gives the same value: `diff profile-eku.txt profile-eku-2.txt` prints nothing. If the portal shows the EKU for the profile or its certificates, compare it too. That display is unconfirmed, so check the current portal.
+  - If it fails: run 7.6 before you stop. Never pin a shared identifier. The backend refuses them at startup and the server will not start:
     - `1.3.6.1.4.1.311.97.1.0` (on every Public Trust certificate)
     - `1.3.6.1.4.1.311.97.1.3.1` (the Private Trust type prefix)
     - `1.3.6.1.4.1.311.97.1.4.1` (the CI policy type prefix)
@@ -516,7 +524,7 @@ Brigalow validates every returned chain to **one** operator-pinned root, and req
 
     A value under `.1.4.1.` means a CI policy profile, which cannot work (0.2).
 
-- [ ] **7.6 Remove the temporary signer access.**
+- [ ] **7.6 Remove the temporary signer access. Run this on success and on every failure or abandoned exit from 7.1–7.5.**
   - Do: `az role assignment delete --ids "$(cat ~/brigalow-evidence/<date>/temp-signer-assignment.txt)"`, then `az role assignment list --assignee "$me" --scope "$profile" -o table`.
   - Expect: an empty list.
 
@@ -555,7 +563,7 @@ Brigalow validates every returned chain to **one** operator-pinned root, and req
     The root is public. The binding's `account` and `profile` must equal `signingAccountName` and `certificateProfileName`.
 
 - [ ] **8.4 Confirm the commit and run what-if.**
-  - Do: `test "$(git rev-parse HEAD)" = "$(cat ~/brigalow-evidence/<date>/commit.txt)" && echo same-commit`. Then run the same what-if as 3.2 with `--name brigalow-first-02`, saved to `what-if-02.txt`.
+  - Do, from `<checkout>`: `test "$(git rev-parse HEAD)" = "$(cat ~/brigalow-evidence/<date>/commit.txt)" && echo same-commit`. Then run the same what-if as 3.2 with `--name brigalow-first-02`, saved to `what-if-02.txt`.
   - Expect: `same-commit`. Changes to Key Vault secrets (`brigalow-config-toml` and `brigalow-artifact-signing-root`; other secrets may also show as changed because secure values are not evaluated) and to the VM NSG, where the SSH rule is removed. Do not rely on what-if to show a `customData` change. The commit check is the real control.
   - If it fails: on a different commit, stop. Check out the recorded commit and rerun. A deployment error mentioning `customData` (`PropertyChangeNotAllowed`) means the same thing.
 
@@ -714,7 +722,7 @@ Verify on your workstation, not on the VM, against the root pinned in phase 7. D
 ## 11. Close out
 
 - [ ] Delete `session-a.headers`, `session-b.headers`, `key.json`, `policy.json` and `token-request.json`. Sign both users out.
-- [ ] Delete any remaining local secret files (`pg-owner-password`, `pg-runtime-password`). The operator vault holds the copies.
+- [ ] Delete any remaining local secret files in `~/brigalow-work` (`pg-owner-password`, `pg-runtime-password`, and `login-state-key`, `tls.key`, `tls.crt` if 2.3 left any). `ls -A ~/brigalow-work` should list none of them. The operator vault holds the copies.
 - [ ] Confirm the state: SSH closed (8.5), admin VM gone (5.7), temporary signer role gone (7.6), managed identity holding exactly two roles (rerun 4.2).
 - [ ] File the evidence ([Evidence to keep](#evidence-to-keep)).
 - [ ] Decide whether to keep running or tear down, and record the teardown date. The account bills monthly regardless.

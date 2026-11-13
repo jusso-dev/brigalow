@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<link rel="preload" href="/static/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/brigalow.css">
+{% block head %}{% endblock %}
+<title>{% block title %}Brigalow{% endblock %}</title>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="masthead">
+<div class="masthead__inner">
+<a class="wordmark" href="{% block home %}/{% endblock %}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.5 4 5.5v6c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10v-6z"/><path d="M8.5 15.5c0-4.5 2.6-7.4 7-8.5-.4 4.6-3 7.6-7 8.5z"/><path d="M8.5 15.5 12.5 11"/></svg>Brigalow</a>
+{% block org %}{% endblock %}
+<nav class="masthead__nav" aria-label="Primary">{% block nav %}{% endblock %}</nav>
+</div>
+</header>
+{% block banner %}{% endblock %}
+<main id="main">
+{% block content %}{% endblock %}
+</main>
+<footer class="foot"><p><span>Brigalow, self-hosted signing control plane</span><span>Digests only. Every decision is written to the audit chain.</span></p></footer>
+</body>
+</html>

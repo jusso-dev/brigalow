@@ -78,7 +78,7 @@ pub const TENANT_MUTATIONS: [(&str, &str); 3] = [
 pub async fn security(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let h = response.headers_mut();
-    h.insert("content-security-policy","default-src 'none'; connect-src 'self'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'".parse().unwrap());
+    h.insert("content-security-policy","default-src 'none'; connect-src 'self'; style-src 'self'; font-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'".parse().unwrap());
     h.insert("x-content-type-options", "nosniff".parse().unwrap());
     h.insert("referrer-policy", "no-referrer".parse().unwrap());
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -554,6 +554,8 @@ pub async fn project_form(
 #[derive(Template)]
 #[template(path = "project.html")]
 struct ProjectTemplate<'a> {
+    org: Uuid,
+    id: Uuid,
     name: &'a str,
     lab: bool,
 }
@@ -571,6 +573,8 @@ pub async fn project_page(
         .ok_or(WebError(StatusCode::NOT_FOUND))?;
     Ok(Html(
         ProjectTemplate {
+            org,
+            id,
             name: &name,
             lab: state.mode == crate::config::Mode::Lab,
         }

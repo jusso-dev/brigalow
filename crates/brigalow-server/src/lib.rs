@@ -98,6 +98,8 @@ pub fn application(state: AppState) -> Router {
     }
     router
         .route("/static/htmx.js", get(approvals::htmx))
+        .route("/static/brigalow.css", get(approvals::stylesheet))
+        .route("/static/fonts/{name}", get(approvals::font))
         .route("/orgs/{org}/requests", get(approvals::queue))
         .route("/orgs/{org}/requests/{id}", get(approvals::page))
         .route("/orgs/{org}/requests/{id}/decisions", post(approvals::form))

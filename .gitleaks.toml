@@ -10,3 +10,10 @@ useDefault = true
 description = "Public Azure built-in role definition GUIDs in Bicep"
 regexTarget = "match"
 regexes = ['''RoleId = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'''']
+
+# This exact, public cache identifier is not an authentication credential.
+# Keep the history scan enabled; do not allowlist the workflow or other keys.
+[[allowlists]]
+description = "Public cargo-fuzz cache identifier"
+regexTarget = "match"
+regexes = ['''^key: fuzz-v1-cargo-fuzz-0\.13\.2$''']

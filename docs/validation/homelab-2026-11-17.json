@@ -1,0 +1,552 @@
+{
+  "date": "2026-11-17",
+  "source_base": "66dd37e0df09870adc2e26d9370f865e04a316b4",
+  "scope": "Disposable single-instance production-mode qualification with generated IdP/TLS/CA and SoftHSM; no real HSM, CA account, cloud deployment or persistent service.",
+  "host": {
+    "architecture": "x86_64",
+    "kernel": "7.0.0-43-generic",
+    "docker": "29.9.3"
+  },
+  "resources": {
+    "runner_cpus": 4,
+    "runner_memory_gib": 6,
+    "builder_cpus": 4,
+    "builder_memory_gib": 8,
+    "builder_parallelism": 1
+  },
+  "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13); pinned production builder",
+  "final_results": [
+    {
+      "name": "tools",
+      "seconds": 6.339,
+      "exit_code": 0
+    },
+    {
+      "name": "format",
+      "seconds": 0.434,
+      "exit_code": 0
+    },
+    {
+      "name": "clippy",
+      "seconds": 6.319,
+      "exit_code": 0
+    },
+    {
+      "name": "probe-regression",
+      "seconds": 2.454,
+      "exit_code": 0
+    },
+    {
+      "name": "probe-redirect-mutation",
+      "exit_code": 101,
+      "expected_failure": true,
+      "seconds": 1.325
+    },
+    {
+      "name": "workspace",
+      "seconds": 30.995,
+      "exit_code": 0
+    },
+    {
+      "name": "oidc-wrapper",
+      "seconds": 0.168,
+      "exit_code": 0
+    },
+    {
+      "name": "production-guards",
+      "seconds": 0.102,
+      "exit_code": 0
+    },
+    {
+      "name": "release-packaging",
+      "seconds": 23.791,
+      "exit_code": 0
+    },
+    {
+      "name": "azure-offline",
+      "seconds": 0.147,
+      "exit_code": 0
+    },
+    {
+      "name": "compose",
+      "seconds": 654.972,
+      "exit_code": 0
+    }
+  ],
+  "first_results": [
+    {
+      "name": "tools",
+      "seconds": 6.333,
+      "exit_code": 0
+    },
+    {
+      "name": "builder",
+      "seconds": 5.265,
+      "exit_code": 0
+    },
+    {
+      "name": "format",
+      "seconds": 0.393,
+      "exit_code": 0
+    },
+    {
+      "name": "clippy",
+      "seconds": 72.628,
+      "exit_code": 0
+    },
+    {
+      "name": "workspace",
+      "seconds": 134.657,
+      "exit_code": 0
+    },
+    {
+      "name": "oidc-wrapper",
+      "seconds": 0.162,
+      "exit_code": 0
+    },
+    {
+      "name": "production-guards",
+      "seconds": 0.105,
+      "exit_code": 0
+    },
+    {
+      "name": "release-packaging",
+      "seconds": 25.769,
+      "exit_code": 1
+    },
+    {
+      "name": "tools",
+      "seconds": 6.239,
+      "exit_code": 0
+    },
+    {
+      "name": "release-packaging",
+      "seconds": 29.279,
+      "exit_code": 0
+    },
+    {
+      "name": "azure-offline",
+      "seconds": 0.146,
+      "exit_code": 0
+    },
+    {
+      "name": "compose",
+      "seconds": 1075.146,
+      "exit_code": 0
+    }
+  ],
+  "local_checks": {
+    "azure_offline": {
+      "passed": 13,
+      "skipped": 0,
+      "seconds": 49.101
+    },
+    "helm": "passed",
+    "actionlint": "passed",
+    "git_diff_check": "passed"
+  },
+  "notes": [
+    "Three Azure tests skipped without az on homelab; all 13 passed locally with Bicep.",
+    "First packaging run failed only on Git ownership in disposable runner; exact task checkout trust was configured inside that runner, then all 33 passed.",
+    "Redirect-following mutation failed as expected and original source was restored before full gates.",
+    "Rust counts include repeated test executions, not distinct acceptance IDs.",
+    "Initial scanner export permission/tag errors were corrected; final report came from the native-healthcheck image.",
+    "First/second elapsed times are not a controlled performance comparison; their source, test inventory and cache warmth differ."
+  ],
+  "tests": {
+    "workspace": {
+      "passed": 53,
+      "failed": 0,
+      "ignored": 0
+    },
+    "compose": {
+      "passed": 84,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "acceptance_markers": [
+    "AT-OPS-04: fresh database migration and idempotent organisation bootstrap",
+    "AT-OPS-04: operator CLI restricted-role refusal",
+    "AT-OPS-05: real TLS/image OIDC login, pending/session restart survival, CSRF, roles, tenant isolation, CLI signing/OpenSSL verification, key disable and token/session revocation passed",
+    "AT-OPS-05: native readiness probe fails boundedly during DB outage; liveness and recovery pass",
+    "AT-OPS-05: non-root/read-only production-mode HSM container, TLS, body/rate limits and credential redaction passed",
+    "AT-AUD-01: database export, 1000 entries, mutation and deletion verified by brig",
+    "AT-OPS-03: scratch DB wiped/restored; all audit chains and request states verified; restored HSM reference signs and OpenSSL verifies",
+    "AT-OPS-01: live health/debug responses and server logs contain no generated secrets"
+  ],
+  "source_sha256": {
+    "Dockerfile": "e8c19b816b38af65acd9ecb61d8285b23e1a672e1f73d82375b8a00b704a000a",
+    "crates/brigalow-server/src/main.rs": "5973d4d3cb0a85b4d61a5f53aeaa52b29900b87abe19f27e0a42e528d4b9f77e",
+    "scripts/e2e.py": "875fab729e6b7bb480dfddff2dc04b2f509e14780cc5756a55a5c45d08dac055",
+    "scripts/production_test.py": "5df402544d34aa026abb1088ca1fe7c9ebbd9e35fed27e3584809fb0c85ddcad",
+    "scripts/production_flow.py": "c65ab0ef11b57643bd10281cffad605b4b8b471e8bb085d44116aa2600230025",
+    "Cargo.lock": "53b51961a0c483f1cf5d0e1221ba573d3fd3e5fcd5cfd8ef7e585f019ffd8beb",
+    "fuzz/Cargo.lock": "39e8908268d873ee3c9f8c6c5db96b3d59e0e5a460cf033111f1ec7ff7acf971"
+  },
+  "image_scan": {
+    "scanner": "Trivy 0.76.2",
+    "database": {
+      "Version": 2,
+      "NextUpdate": "2026-11-18T06:59:44.233351009Z",
+      "UpdatedAt": "2026-11-17T06:59:44.233351399Z",
+      "DownloadedAt": "2026-11-17T12:00:11.822908798Z"
+    },
+    "removed_packages": [
+      "curl",
+      "libbrotli1",
+      "libcurl4",
+      "libgssapi-krb5-2",
+      "libk5crypto3",
+      "libkeyutils1",
+      "libkrb5-3",
+      "libkrb5support0",
+      "libldap-2.5-0",
+      "libnghttp2-14",
+      "libpsl5",
+      "librtmp1",
+      "libsasl2-2",
+      "libsasl2-modules-db",
+      "libssh2-1"
+    ],
+    "before": {
+      "scanned_config_id": "sha256:ac41c75848d7134ab1739fb91b1d5950b7503bdc2154be6c124fe1157024c4a3",
+      "export_archive_bytes": 56083968,
+      "os": {
+        "Family": "debian",
+        "Name": "12.15"
+      },
+      "package_count": 106,
+      "severities": {
+        "LOW": 154,
+        "HIGH": 104,
+        "MEDIUM": 151,
+        "UNKNOWN": 5,
+        "CRITICAL": 1
+      },
+      "high_critical_distinct": 31,
+      "fixable_high_critical": [],
+      "raw_report_sha256": "440649db33e5d7a36068b3d5cf1703b375eddd1740003bac983cb6340a275e42"
+    },
+    "after": {
+      "scanned_config_id": "sha256:29b732df32e87606492fee35ce09a975aab8ac4a3017959553ce7be7b6b0adfc",
+      "export_archive_bytes": 53908480,
+      "os": {
+        "Family": "debian",
+        "Name": "12.15"
+      },
+      "package_count": 91,
+      "severities": {
+        "LOW": 87,
+        "HIGH": 37,
+        "MEDIUM": 108,
+        "UNKNOWN": 5,
+        "CRITICAL": 1
+      },
+      "high_critical_distinct": 11,
+      "fixable_high_critical": [],
+      "raw_report_sha256": "ac7ee9b388fea511afd657436dfbe3e1d739adb36558c3a2afd3d12d7c088cfe"
+    },
+    "remaining_high_critical": [
+      {
+        "VulnerabilityID": "CVE-2026-53613",
+        "Severity": "HIGH",
+        "SeveritySource": null,
+        "Status": "affected",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-53613",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "bsdutils",
+            "version": "1:2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libblkid1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libmount1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libsmartcols1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libuuid1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "mount",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "util-linux",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "util-linux-extra",
+            "version": "2.38.1-5+deb12u3"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2026-53615",
+        "Severity": "HIGH",
+        "SeveritySource": null,
+        "Status": "affected",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-53615",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "bsdutils",
+            "version": "1:2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libblkid1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libmount1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libsmartcols1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libuuid1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "mount",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "util-linux",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "util-linux-extra",
+            "version": "2.38.1-5+deb12u3"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2026-78410",
+        "Severity": "HIGH",
+        "SeveritySource": null,
+        "Status": "affected",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-78410",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "bsdutils",
+            "version": "1:2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libblkid1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libmount1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libsmartcols1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "libuuid1",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "mount",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "util-linux",
+            "version": "2.38.1-5+deb12u3"
+          },
+          {
+            "name": "util-linux-extra",
+            "version": "2.38.1-5+deb12u3"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2026-41992",
+        "Severity": "HIGH",
+        "SeveritySource": "nvd",
+        "Status": "fix_deferred",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-41992",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "gzip",
+            "version": "1.12-1"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2026-54369",
+        "Severity": "HIGH",
+        "SeveritySource": null,
+        "Status": "fix_deferred",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-54369",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "libacl1",
+            "version": "2.3.1-3"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2025-6020",
+        "Severity": "HIGH",
+        "SeveritySource": null,
+        "Status": "affected",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2025-6020",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "libpam-modules",
+            "version": "1.5.2-6+deb12u2"
+          },
+          {
+            "name": "libpam-modules-bin",
+            "version": "1.5.2-6+deb12u2"
+          },
+          {
+            "name": "libpam-runtime",
+            "version": "1.5.2-6+deb12u2"
+          },
+          {
+            "name": "libpam0g",
+            "version": "1.5.2-6+deb12u2"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2026-16742",
+        "Severity": "HIGH",
+        "SeveritySource": null,
+        "Status": "fix_deferred",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-16742",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "libsystemd0",
+            "version": "252.39-1~deb12u2"
+          },
+          {
+            "name": "libudev1",
+            "version": "252.39-1~deb12u2"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2025-69720",
+        "Severity": "HIGH",
+        "SeveritySource": "nvd",
+        "Status": "affected",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2025-69720",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "libtinfo6",
+            "version": "6.4-4"
+          },
+          {
+            "name": "ncurses-base",
+            "version": "6.4-4"
+          },
+          {
+            "name": "ncurses-bin",
+            "version": "6.4-4"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2026-9538",
+        "Severity": "HIGH",
+        "SeveritySource": "nvd",
+        "Status": "fix_deferred",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-9538",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "perl-base",
+            "version": "5.36.0-7+deb12u4"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2023-45853",
+        "Severity": "CRITICAL",
+        "SeveritySource": "nvd",
+        "Status": "will_not_fix",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2023-45853",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "zlib1g",
+            "version": "1:1.2.13.dfsg-1"
+          }
+        ]
+      },
+      {
+        "VulnerabilityID": "CVE-2026-85091",
+        "Severity": "HIGH",
+        "SeveritySource": null,
+        "Status": "affected",
+        "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-85091",
+        "FixedVersion": null,
+        "packages": [
+          {
+            "name": "zlib1g",
+            "version": "1:1.2.13.dfsg-1"
+          }
+        ]
+      }
+    ],
+    "triage": {
+      "CVE-2023-45853": {
+        "source": "https://security-tracker.debian.org/tracker/CVE-2023-45853",
+        "assessment": "Debian marks Bookworm zlib ignored because contrib/minizip is not built into its binary packages; no minizip package is installed. Scanner result retained, not suppressed."
+      }
+    },
+    "scope": "OS packages only, all severities, no ignore file, no ignore-unfixed. Does not replace Cargo advisory audit or vendor-provider qualification.",
+    "base_upgrade_experiment": "Pinned Debian trixie-slim still reported 47 HIGH package findings; no runtime base upgrade was made."
+  },
+  "implementation_commit": "4db39b85a203808b360b47fa492e751584370c9c",
+  "cleanup": {
+    "projects": [
+      "brigalow-test-4d81c99de1f8",
+      "brigalow-test-97d1afdca9db"
+    ],
+    "cargo_clean": "Removed 16919 files, 10.7GiB total",
+    "isolated_builder_removed": true,
+    "remaining_containers": [],
+    "remaining_networks": [],
+    "remaining_volumes": [],
+    "remaining_images": [],
+    "original_running_container_count": 74,
+    "original_running_containers_preserved": 74,
+    "original_running_ids_missing": [],
+    "temporary_directory_removed": true,
+    "new_unused_base_images_removed": [
+      "rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c",
+      "postgres:16-bookworm",
+      "nginxinc/nginx-unprivileged:stable-bookworm@sha256:cd33960e98e93d4d63385790ff7f8f5bf2ca95184c581b7f42ae8aea1139fbfc",
+      "moby/buildkit:buildx-stable-1"
+    ]
+  },
+  "go_live_limits": [
+    "Only one server replica is supported; multi-process signing/fencing and real HSM failover are not qualified.",
+    "Generated IdP/TLS/CA and SoftHSM tests do not qualify the operator identity system, vendor HSM/provider, key custody/backup, public trust or compliance.",
+    "Remaining OS package advisories require deployment-specific review; zero fixable findings is not zero vulnerabilities.",
+    "No persistent production deployment or independent external security review was performed."
+  ]
+}

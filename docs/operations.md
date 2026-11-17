@@ -2,6 +2,11 @@
 
 Brigalow is self-hosted. These are operator procedures and a tested single-instance deployment reference, not a production deployment or a security/compliance certification. Run the complete acceptance suite and commission an independent review of your exact configuration/revision before production use.
 
+The [2026-11-17 disposable homelab qualification](validation/homelab-2026-11-17.md)
+records actual TLS/image signing, restart and outage behaviour, full acceptance
+results, OS package findings and cleanup. Its software evidence does not replace
+qualification of your vendor HSM, identity system or production recovery process.
+
 ## Request budgets and ingress
 
 The server accepts at most 64 KiB request bodies. Configure a trusted TLS reverse proxy with connection/header/time limits and network controls; unauthenticated login/token verification and health traffic need ingress limits independently of authenticated budgets.

@@ -38,7 +38,7 @@ gh api 'repos/jusso-dev/brigalow/actions/runs/<id>/jobs?per_page=100'
 Each response had fewer than 100 jobs. This is a recent convenience sample,
 not a matched before/after experiment. There are 13 CI runs (10 successful,
 3 failed) and 17 successful dependency audits; no cancelled runs in this window.
-Median successful CI feedback is 791.5 s; median sum of its job runtimes is
+Median successful CI feedback is 791 s; median sum of its job runtimes is
 987 s. Median dependency-audit feedback is 165 s and job runtime is 163 s.
 Different commits and machines mean these medians are context, not attribution.
 
@@ -48,7 +48,7 @@ both passed:
 
 | Job / step | Seconds |
 | --- | ---: |
-| CI feedback, creation to final job completion | 749 |
+| CI feedback, creation to final job completion | 748 |
 | rust job | 746 |
 | Clippy | 36 |
 | Default-feature workspace tests | 61 |
@@ -79,7 +79,8 @@ Keep cache use within the repository's included storage; no paid limit changes.
 1. Cache pinned audit/fuzz installation and Cargo dependencies. Audit compilation
    alone is 90% of its exact-head job, repeated even for daily advisory checks.
    Always execute `cargo install --locked --version ...` so a missing, partial
-   or wrong-version cache falls back to installation. Always run both audits;
+   or wrong-version cache does not authorise skipping the tool. Cache misses
+   fall back to installation; unusable tools fail the job. Always run both audits;
    never cache advisory results or the advisory database.
 2. Cancel superseded revisions of the same PR, separately per workflow. Keep
    main, scheduled and manual runs independent, including queued runs. The
@@ -111,3 +112,117 @@ cache bytes, failures and cancellations. Report feedback and summed job seconds
 separately. Revert a cache if transfer exceeds compilation saved. Main writes
 only on success; PRs restore only. Rollback is removal of cache steps and the
 concurrency block; all test commands remain intact.
+
+## Implemented safeguards
+
+The cache action is pinned to `Swatinem/rust-cache` v2.9.3 commit
+`d1527c8f67ef9af357290475d4af4b0fab8f12e0`, resolved through its annotated tag.
+Its pinned `config.ts`, `workspace.ts`, `save.ts`, `cleanup.ts` and `action.yml`
+were inspected: keys include installed compiler versions (including nightly),
+host architecture, relevant compiler environment, manifests and lockfiles.
+Job-specific keys separate the workspace, fuzz and audit caches; tool versions
+also enter their keys. Workspace products are pruned by default; dependencies
+are reusable. The fuzz cache points to `fuzz/target`, not the root target.
+Audit caching excludes target directories. No database, HSM token, generated
+certificate directory, test result or advisory database is cached.
+
+PRs only restore. Successful main pushes populate Rust/fuzz caches; successful
+main push, schedule or manual audit runs populate the audit cache. Main runs
+use unique concurrency groups, so new pushes cannot displace queued main
+validation. Only revisions of the same PR and same workflow share a group.
+No cache hit controls whether a test executes. A compiler upgrade deliberately
+misses the old cache. GitHub's cache service remains required to verify actual
+restore/save performance; local archive timing does not emulate that service.
+
+Fuzz verification exposed a stale lockfile: the `brigalow-crypto` dependency
+list omitted `url`, although that version was already locked transitively.
+`cargo-fuzz` 0.13.2 silently repairs it and has no `--locked` option. Record the
+missing edge without changing package versions, then run locked Cargo metadata
+after cache restore and before fuzzing. Replaying the original lockfile makes
+the new guard fail; the repaired lockfile passes. All three parser targets keep
+their 15-second budgets and existing sanitizer settings.
+
+The cheap wrapper, production-input and package guards precede Clippy. Azure's
+Bicep checks remain after Clippy: their observed 24-second hosted step is not
+cheap enough to put ahead of every lint failure. A packaging failure at the
+baseline would be found roughly 36 seconds earlier by this ordering, excluding
+cache and runner variance; a Clippy failure waits about 12 seconds longer for
+the three guards. Successful runs do the same work.
+
+## Local setup experiment
+
+On macOS arm64 with Rust 1.100.0, install each exact tool into an empty temporary
+`--root`, archive `bin`, `.crates.toml` and `.crates2.json`, extract into a second
+empty root, then repeat the same pinned install command. An isolated
+`CARGO_TARGET_DIR` holds tool builds. Registry downloads may already be cached;
+other local acceptance work ran concurrently. These are single observations,
+not controlled hosted speedups.
+
+| Tool | Fresh installation | Restored installation | Archive size | Local archive round trip |
+| --- | ---: | ---: | ---: | ---: |
+| cargo-audit 0.22.2 | 58.646 s | 0.299 s | 7,769,118 bytes | 1.324 s |
+| cargo-fuzz 0.13.2 | 10.218 s | 0.340 s | 861,894 bytes | 0.161 s |
+
+Both restored installs succeeded and the restored executables ran their actual
+checks. Executables were byte-identical after restoration. Removing only the
+restored fuzz binary while retaining its Cargo metadata triggered a successful
+reinstall (3.339 s), confirming the partial-cache recovery case. Combined
+install time falls from 68.864 to 0.639 seconds; with local
+compression/extraction included, the measured setup saving is 66.740 seconds.
+Network transfer and the action's registry cache are not included. At the
+hosted baseline, those two install steps total 200 seconds (17.6% of combined
+job runtime); that is an upper bound before cache costs, not verified savings.
+They are off the successful-run critical path. Rust dependency reuse may
+improve that path, but no hosted improvement is claimed yet.
+
+Fresh `cargo audit --deny warnings` rejects the unchanged application lockfile:
+`chrono 0.4.45`, through `oauth2 5.0.0`, now reports
+[RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543) as
+unmaintained. The historical successful audits do not supersede this result.
+No warning exemption or authentication dependency change is bundled into CI
+optimisation. The repaired fuzz lockfile passes the same advisory database
+(1,527 advisories). This outstanding application dependency warning prevents
+claiming an entirely green current gate.
+
+## Final local validation
+
+[Machine-readable results](local-2026-11-17.json) retain command timings and
+outcomes. Rust 1.100.0 was selected explicitly without changing the machine's
+default; fuzz instrumentation used installed nightly 1.102.0 (2026-11-10).
+
+| Check | Outcome / elapsed |
+| --- | --- |
+| Format | pass, 0.989 s |
+| Full-workspace, all-target, all-feature Clippy | pass, 22.452 s with empty root target |
+| Default-feature workspace tests | 51 passed, 0 failed/ignored; 52.222 s |
+| Full Compose acceptance, `--context orbstack` | pass, 581.669 s; 82 Rust test executions plus Python/OpenSSL assertions |
+| Warm Clippy / default-feature tests | pass, 1.155 / 20.292 s; same 51 tests |
+| Python OIDC / production / release / Azure tests | 2 / 1 / 33 / 13 passed; local Bicep checks enabled |
+| Helm lint/render/refusal checks | pass |
+| Gitleaks full-history redacted scan | pass, 161 commits at scan time |
+| Three fuzz targets, 15-second budget each | pass, 1,116,135 executions; 123.263 s including compilation |
+| Fuzz lockfile audit | pass |
+| Application lockfile audit | **fails** on the existing Chrono warning above |
+| actionlint and `git diff --check` | pass |
+| Original workflow command/trigger/check-name comparison | all preserved; only new executable gate is locked fuzz metadata |
+
+The warm workspace timings retain local workspace products as well as
+dependencies; the hosted action prunes workspace products. They demonstrate
+that repeated compilation matters, but overstate what dependency-only caching
+can promise. The Compose run exercised all default harness stages, including
+restricted DB roles, native tools, production-mode image qualification and
+scratch backup/restore. Its count includes repeated store/default tests and
+must not be presented as 82 distinct acceptance contracts.
+
+No published run of these workflow changes exists yet. The next hosted run
+must be cold unless a compatible trusted main cache exists; PRs cannot warm
+main's cache. After integration, compare subsequent runs with the same-source
+cold/warm protocol above. The remaining Docker-build work is the priority for
+critical-path improvement. Application dependency remediation is a separate
+required follow-up; do not waive the failing audit to obtain timing results.
+
+Cleanup completed: `cargo clean` in the root workspace, fuzz workspace and
+isolated tool-build target removed 5.6 GiB, 607.5 MiB and 701.0 MiB respectively.
+The acceptance harness removed its containers, networks and tagged images;
+newly generated fuzz corpus/artifact files were removed without touching older
+files. Shared Docker build caches and unrelated resources were not pruned.

@@ -31,10 +31,18 @@ jobs:
         run: python3 scripts/test_production.py
       - name: Release packaging tests
         run: python3 scripts/test_release.py
-      - name: Azure reference offline tests (az bicep template check skips without az)
-        run: python3 deploy/azure/test_azure.py
+      # Cache dependencies, not test results or generated acceptance state.
+      # Toolchains, manifests, lockfiles and compiler flags enter the action's key.
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: workspace-v1
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Azure reference offline tests (az bicep template check skips without az)
+        run: python3 deploy/azure/test_azure.py
       - name: Test
         run: cargo test --locked --workspace
       - name: Compose acceptance tests
@@ -65,6 +73,15 @@ jobs:
           persist-credentials: false
       - name: Nightly for fuzz instrumentation only
         run: rustup toolchain install nightly --profile minimal
+      # Both installed stable and nightly compilers enter the cache key.
+      - name: Restore fuzz dependencies and driver
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: fuzz-v1-cargo-fuzz-0.13.2
+          workspaces: fuzz -> target
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Verify locked fuzz dependencies
+        run: cargo metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
       - name: Install pinned fuzz driver
         run: cargo install cargo-fuzz --locked --version 0.13.2
       - name: Bounded parser fuzzing

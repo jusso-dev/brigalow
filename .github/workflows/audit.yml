@@ -21,6 +21,13 @@ jobs:
           persist-credentials: false
       - name: Stable Rust
         run: rustup toolchain install stable --profile minimal && rustup default stable
+      # Cache installation only. The audit below still fetches current advisories.
+      - name: Restore audit tool
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: audit-v1-cargo-audit-0.22.2
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
       - name: Install pinned audit tool
         run: cargo install cargo-audit --locked --version 0.22.2
       - name: Audit application and fuzz lockfiles (no advisory exceptions)

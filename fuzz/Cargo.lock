@@ -106,6 +106,7 @@ dependencies = [
  "signature 2.2.0",
  "spki 0.7.3",
  "thiserror",
+ "url",
  "uuid",
  "x509-cert",
  "x509-tsp",

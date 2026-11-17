@@ -181,8 +181,8 @@ Fresh `cargo audit --deny warnings` rejects the unchanged application lockfile:
 unmaintained. The historical successful audits do not supersede this result.
 No warning exemption or authentication dependency change is bundled into CI
 optimisation. The repaired fuzz lockfile passes the same advisory database
-(1,527 advisories). This outstanding application dependency warning prevents
-claiming an entirely green current gate.
+(1,527 advisories). That initial warning prevented claiming an entirely green gate; the follow-up
+remediation below removes it without exemptions.
 
 ## Final local validation
 
@@ -202,7 +202,7 @@ default; fuzz instrumentation used installed nightly 1.102.0 (2026-11-10).
 | Gitleaks full-history redacted scan | pass, 161 commits at scan time |
 | Three fuzz targets, 15-second budget each | pass, 1,116,135 executions; 123.263 s including compilation |
 | Fuzz lockfile audit | pass |
-| Application lockfile audit | **fails** on the existing Chrono warning above |
+| Application lockfile audit, initial CI-only change | **failed** on Chrono; fixed in the follow-up below |
 | actionlint and `git diff --check` | pass |
 | Original workflow command/trigger/check-name comparison | all preserved; only new executable gate is locked fuzz metadata |
 
@@ -214,15 +214,54 @@ restricted DB roles, native tools, production-mode image qualification and
 scratch backup/restore. Its count includes repeated store/default tests and
 must not be presented as 82 distinct acceptance contracts.
 
-No published run of these workflow changes exists yet. The next hosted run
-must be cold unless a compatible trusted main cache exists; PRs cannot warm
-main's cache. After integration, compare subsequent runs with the same-source
+At the end of the initial CI-only implementation, no published run existed.
+The first hosted run is cold unless a compatible trusted main cache exists;
+PRs cannot warm main's cache. After integration, compare subsequent runs with the same-source
 cold/warm protocol above. The remaining Docker-build work is the priority for
-critical-path improvement. Application dependency remediation is a separate
-required follow-up; do not waive the failing audit to obtain timing results.
+critical-path improvement. Application dependency remediation was subsequently
+authorised and is recorded below; no audit warning was waived to obtain timing
+results.
 
 Cleanup completed: `cargo clean` in the root workspace, fuzz workspace and
 isolated tool-build target removed 5.6 GiB, 607.5 MiB and 701.0 MiB respectively.
 The acceptance harness removed its containers, networks and tagged images;
 newly generated fuzz corpus/artifact files were removed without touching older
 files. Shared Docker build caches and unrelated resources were not pruned.
+
+## Audit remediation follow-up (2026-11-17)
+
+Justin authorised fixing the warning and pushing the complete change to main.
+The released OAuth2 5.0.0 and inspected upstream development code still depend
+on Chrono. Remove the unused OAuth2 dependency rather than pinning another
+affected Chrono version or adding an advisory exception. The application now
+uses its existing OS-random secret helper, RustCrypto SHA-256, base64url and URL
+encoding for the same narrow authorization-code request. No new dependency or
+cryptographic primitive is introduced. See [ADR 0003](../decisions/0003-dependency-audit.md).
+
+The lockfile removes 13 packages and adds or upgrades none. Both application
+(319 crates) and fuzz (220 crates) audits pass with all warnings denied against
+the refreshed 1,527-advisory database. The RFC 7636 S256 vector and parameter
+encoding regression passes; replacing the challenge with the plain verifier
+makes that regression fail. The mutation was restored before the full gates.
+
+The follow-up full-history secret scan also identified the literal public
+cache name `fuzz-v1-cargo-fuzz-0.13.2` as a generic API key in the earlier CI
+commit. `.gitleaks.toml` permits only that exact matched assignment, not a file,
+path or class of keys. Full-history scanning passes; synthetic unrelated
+credentials in the same file and on the same line still fail scanning.
+
+[Follow-up results](audit-fix-2026-11-17.json) record the full rerun:
+52 default-feature workspace tests and 83 Compose Rust test executions passed,
+with no failures or ignored tests. Compose took 531.403 seconds and also passed
+the Python/OpenSSL checks, native signing tools, production image qualification
+and scratch backup/restore. Format, all-target/all-feature Clippy, all 49 Python
+guards, Helm and actionlint passed. All three fuzz targets retained their
+15-second budgets and completed 1,232,623 executions without a failure.
+
+These local measurements validate correctness, not a hosted performance gain.
+The follow-up changes application source, and local build caches differ from
+the original run. Both lockfiles pass the same strict audit gate. The independent
+RFC vector detects a plain-verifier mutation, which was reverted before the
+full suite. Cleanup again ran `cargo clean` for root, fuzz and isolated tool
+targets; the acceptance project's containers, networks and tagged images are
+gone, and only newly generated fuzz inputs were removed.

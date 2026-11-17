@@ -151,6 +151,12 @@ AT-REL-03 unit coverage is `scripts/test_release.py`, using OpenSSL keys generat
 
 AT-ID-01/02 additionally reject signed tokens with invalid nonce, issued-at/azp/multiple audiences, unsupported critical/type headers and incompatible/duplicate JWKS entries. Root and fuzz lockfiles pass `cargo audit --deny warnings` without exceptions in the dependency-audit workflow. All 41 implemented acceptance IDs (the original 35 plus AT-AUD-03, AT-AZ-01, AT-HA-01, AT-ID-04, AT-REC-01 and AT-REL-03) require local and hosted gates; AT-HA-02 is listed but not implemented; image tests use only generated local test credentials, never vendor devices or production services.
 
+`auth::oidc::tests::authorization_request_matches_rfc7636_and_encodes_parameters`
+checks PKCE S256 against RFC 7636 Appendix B and ensures URL encoding preserves
+reserved characters, Unicode and existing endpoint parameters without exposing
+the verifier. AT-ID-01 still checks the real token exchange and rejects a wrong
+verifier after removal of the OAuth2/Chrono dependency chain (ADR 0003).
+
 ## Shared login state automation
 
 `at_ha_01_shared_login_state_across_instances` in `crates/brigalow-server/tests/identity.rs` (integration feature) builds separate `Store` pools, `Identity` instances and axum routers over the Compose Postgres and HTTPS test IdP. The IdP counts token-endpoint attempts per authorisation code. That count proves wrong-browser, expired, tampered and DB-failure paths make zero exchanges, and racing callbacks exactly one. Key material is generated at test time. The test holds an exclusive database guard while it measures global inventory. `auth::login_keys` unit tests cover seal/open, rotation, AAD binding and tampering. `config::tests::login_key_ring_files_are_private_exact_and_redacted` covers 0600/symlink/length/base64/duplicate checks and redaction. `scripts/production_test.py::qualify` starts the production image with a generated login key and checks the logs do not contain it. AT-HA-02 is not implemented.

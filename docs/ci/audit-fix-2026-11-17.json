@@ -1,0 +1,152 @@
+{
+  "rust": "1.100.0",
+  "scope": "Audit remediation after CI setup optimisation",
+  "removed_packages": 13,
+  "added_packages": 0,
+  "upgraded_packages": 0,
+  "audit": [
+    {
+      "name": "application-audit",
+      "exit_code": 0,
+      "seconds": 3.088
+    },
+    {
+      "name": "fuzz-audit",
+      "exit_code": 0,
+      "seconds": 0.186
+    }
+  ],
+  "pkce_regression": [
+    {
+      "name": "pkce-reference",
+      "exit_code": 0,
+      "seconds": 24.757
+    },
+    {
+      "name": "pkce-plain-mutation",
+      "exit_code": 101,
+      "seconds": 2.539
+    }
+  ],
+  "guards": [
+    {
+      "name": "workflow-lint",
+      "seconds": 1.365,
+      "exit_code": 0
+    },
+    {
+      "name": "oidc-wrapper",
+      "seconds": 0.505,
+      "exit_code": 0
+    },
+    {
+      "name": "production-input",
+      "seconds": 0.132,
+      "exit_code": 0
+    },
+    {
+      "name": "release-packaging",
+      "seconds": 40.09,
+      "exit_code": 0
+    },
+    {
+      "name": "azure-offline",
+      "seconds": 20.957,
+      "exit_code": 0
+    },
+    {
+      "name": "helm",
+      "seconds": 1.054,
+      "exit_code": 0
+    },
+    {
+      "name": "secrets",
+      "seconds": 0.964,
+      "exit_code": 1
+    }
+  ],
+  "scanner_followup": {
+    "full_history_passed": true,
+    "unrelated_synthetic_credential_detected": true,
+    "seconds": 1.688,
+    "same_line_synthetic_credential_detected": true
+  },
+  "note": "Initial full-history scan false positive on exact public cache assignment. Exact-match allowlist fixes it; unrelated synthetic credentials in the same file and same line remain detected. All full-suite and audit gates passed. Plain-verifier mutation failed as expected and was restored before the full suite.",
+  "fuzz": {
+    "name": "fuzz",
+    "exit_code": 0,
+    "seconds": 138.409,
+    "executions": [
+      944874,
+      44849,
+      242900
+    ]
+  },
+  "date": "2026-11-17",
+  "source_base": "8eae9ab74082372f187e4af2236c71945fc19210",
+  "source_note": "Uncommitted audit remediation diff on source_base; committed together with this evidence.",
+  "full_suite": [
+    {
+      "name": "format",
+      "seconds": 1.44,
+      "exit_code": 0
+    },
+    {
+      "name": "clippy",
+      "seconds": 49.624,
+      "exit_code": 0
+    },
+    {
+      "name": "workspace",
+      "seconds": 80.51,
+      "exit_code": 0
+    },
+    {
+      "name": "compose",
+      "seconds": 531.403,
+      "exit_code": 0
+    }
+  ],
+  "test_executions": {
+    "workspace": {
+      "passed": 52,
+      "failed": 0,
+      "ignored": 0
+    },
+    "compose": {
+      "passed": 83,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "compose_note": "Rust counts include repeated tests, not distinct acceptance contracts. Python/OpenSSL, native tools, production-container and scratch backup/restore assertions also passed.",
+  "python_tests": {
+    "oidc_wrapper": 2,
+    "production_input": 1,
+    "release_packaging": 33,
+    "azure_offline": 13
+  },
+  "cleanup": {
+    "cargo_clean": [
+      {
+        "name": "root",
+        "exit_code": 0,
+        "output": "     Removed 31529 files, 6.8GiB total\n"
+      },
+      {
+        "name": "fuzz",
+        "exit_code": 0,
+        "output": "     Removed 2103 files, 607.5MiB total\n"
+      },
+      {
+        "name": "tools",
+        "exit_code": 0,
+        "output": "     Removed 3664 files, 701.0MiB total\n"
+      }
+    ],
+    "generated_fuzz_files_removed": 2647,
+    "compose_project": "brigalow-test-d5c7c8d63346",
+    "compose_resources_absent": true
+  },
+  "measurement_limit": "Local macOS timings; hosted cache savings not yet measured. No hosted performance attribution from this application-source-changing rerun."
+}

@@ -11,3 +11,27 @@ The application and fuzz lockfiles must pass `cargo audit --deny warnings`, with
 - Askama 0.16 runs without its unused TOML configuration feature, removing unmaintained basic-toml. HTML autoescaping stays enabled and tested.
 
 Do not reintroduce a legacy crypto or unused database family to bypass this boundary. Update the actual dependency or design the integration against a maintained backend. Cargo advisories do not cover vendor HSM modules, container operating-system packages or the operator's deployment configuration; qualify those separately.
+
+## 2026-11-17: remove the unused OAuth2/Chrono dependency chain
+
+RUSTSEC-2026-0543 marks every Chrono version unmaintained. The released oauth2
+5.0.0 and the inspected upstream development manifest both require Chrono;
+disabling default features does not remove it. Brigalow used neither OAuth2
+transport nor its time-bearing token types: only authorization URL construction,
+random state and the PKCE challenge helper.
+
+Remove that dependency without adding a fork or suppressing advisories. Use
+the existing 32-byte `OsRng` helper for independent verifier/state values,
+RustCrypto `sha2` and `base64` for the RFC 7636 S256 transformation, and `url`
+for query encoding. These are existing library primitives, not a new hash,
+cipher or random generator. Scope stays `openid groups`; authorization-code
+flow, nonce, redirect URI and S256 remain mandatory. The verifier stays in the
+encrypted pending-login record and only goes to the pinned token endpoint.
+JWT validation, browser binding, expiry, consumption and token exchange do
+not change. This supersedes the OAuth2-library choice above.
+
+The regression uses RFC 7636 Appendix B's independent vector and checks query
+encoding for reserved characters, Unicode and existing endpoint parameters.
+AT-ID-01 and AT-HA-01 retain real generated IdP coverage, including wrong PKCE
+verifiers and single-use, browser-bound shared state. No warning exemptions
+are permitted.

@@ -3,13 +3,34 @@ use brigalow_store::{
     login::{NewPendingLogin, Sealed},
     Store,
 };
-use oauth2::{
-    basic::BasicClient, AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope,
-};
 pub struct Login {
     pub url: String,
     pub browser: String,
 }
+
+fn authorization_url(
+    human: &HumanConfig,
+    redirect: &str,
+    state: &str,
+    nonce: &str,
+    verifier: &str,
+) -> Result<url::Url, AuthError> {
+    // RFC 7636 section 4.2: S256 uses RustCrypto SHA-256 and unpadded base64url.
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let mut url = url::Url::parse(&human.authorization_url).map_err(|_| AuthError)?;
+    url.query_pairs_mut().extend_pairs([
+        ("response_type", "code"),
+        ("client_id", human.client_id.as_str()),
+        ("state", state),
+        ("code_challenge", challenge.as_str()),
+        ("code_challenge_method", "S256"),
+        ("redirect_uri", redirect),
+        ("scope", "openid groups"),
+        ("nonce", nonce),
+    ]);
+    Ok(url)
+}
+
 impl Identity {
     fn redirect(&self, a: &Authority) -> String {
         format!(
@@ -27,23 +48,16 @@ impl Identity {
     ) -> Result<Login, AuthError> {
         let a = self.authority(org, provider)?;
         let h = a.human.as_ref().ok_or(AuthError)?;
-        let client = BasicClient::new(ClientId::new(h.client_id.clone()))
-            .set_auth_uri(AuthUrl::new(h.authorization_url.clone()).map_err(|_| AuthError)?)
-            .set_redirect_uri(RedirectUrl::new(self.redirect(a)).map_err(|_| AuthError)?);
-        let (challenge, pkce) = PkceCodeChallenge::new_random_sha256();
+        // Independent 256-bit OS-random secrets; the verifier is 43 RFC 7636 characters.
+        let pkce = random_secret();
+        let state = random_secret();
         let nonce = random_secret();
-        let (url, state) = client
-            .authorize_url(CsrfToken::new_random)
-            .add_scope(Scope::new("openid".into()))
-            .add_scope(Scope::new("groups".into()))
-            .add_extra_param("nonce", nonce.clone())
-            .set_pkce_challenge(challenge)
-            .url();
+        let url = authorization_url(h, &self.redirect(a), &state, &nonce, &pkce)?;
         let browser = random_secret();
         let keys = self.login_keys.as_ref().ok_or(AuthError)?;
-        let state_hash = hash(state.secret());
+        let state_hash = hash(&state);
         let key_id = keys.active_id().to_owned();
-        let secrets = login_keys::encode_secrets(pkce.secret(), &nonce)?;
+        let secrets = login_keys::encode_secrets(&pkce, &nonce)?;
         let browser_hash = hash(&browser);
         // DB failure or exhausted bounds reject the login; there is no in-memory fallback.
         store
@@ -194,4 +208,47 @@ fn validate_id_claims(
         return Err(AuthError);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorization_request_matches_rfc7636_and_encodes_parameters() {
+        // RFC 7636 Appendix B supplies an independent S256 test vector.
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let human = HumanConfig {
+            client_id: "client &+=/雪".into(),
+            authorization_url: "https://idp.example/authorize?tenant=one%2Btwo".into(),
+            token_url: "https://idp.example/token".into(),
+            group_roles: BTreeMap::new(),
+        };
+        let redirect = "https://brigalow.example/auth/org/provider/callback";
+        let url = authorization_url(
+            &human,
+            redirect,
+            "state&nonce=wrong",
+            "nonce+value",
+            verifier,
+        )
+        .unwrap();
+        let pairs: Vec<_> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.len(), 9);
+        let params: BTreeMap<_, _> = pairs.into_iter().collect();
+        assert_eq!(params.len(), 9);
+        assert_eq!(params["tenant"], "one+two");
+        assert_eq!(params["response_type"], "code");
+        assert_eq!(params["client_id"], human.client_id);
+        assert_eq!(params["redirect_uri"], redirect);
+        assert_eq!(params["scope"], "openid groups");
+        assert_eq!(params["state"], "state&nonce=wrong");
+        assert_eq!(params["nonce"], "nonce+value");
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert_eq!(
+            params["code_challenge"],
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+        assert!(!url.as_str().contains(verifier));
+    }
 }

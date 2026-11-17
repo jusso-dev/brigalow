@@ -8,9 +8,19 @@ Supported topology: one server, one TLS proxy, external Postgres and a vendor HS
 
 Build the `production` target from the repository's root Dockerfile using an explicitly named Docker context. The final image runs as UID/GID 10001, includes the server and operator commands, and defaults to production mode. It contains neither a compiler nor SoftHSM. Builder/runtime base images are pinned by digest. Rebuild and scan OS packages and the vendor provider as part of your image release process.
 
+The image uses `brigalow-server --healthcheck` instead of installing curl and
+its transport dependencies. This silent probe contacts only
+`http://127.0.0.1:8080/healthz`, requires HTTP 200, refuses redirects and proxies,
+and times out after four seconds. It does not load configuration or credentials
+or create an HSM session. The fixed port is the container reference's internal
+port; custom deployments on another port should use their orchestrator's HTTP
+readiness probe. The acceptance suite pauses only its disposable database to
+check that readiness fails within its bound while liveness stays available,
+then verifies recovery after the database resumes.
+
 Extend that image with your licensed/reviewed vendor PKCS#11 module and its required non-secret configuration. Configure `hsm_module` to the exact path and `hsm_token` to the intended token label. The stock image cannot sign without that provider; it never falls back. Do not deploy the `test-runtime` target: it adds SoftHSM solely for isolated acceptance tests.
 
-`python3 scripts/e2e.py --context <local-context>` validates the production image contract, then starts a separate production-mode container with the test-only provider, external test Postgres/IdP and generated credentials. The real TLS proxy is checked for body/rate limits and secret-free output. No real HSM or cluster is contacted. A successful SoftHSM run is not evidence about vendor hardware, firmware, backup or key attestation.
+`python3 scripts/e2e.py --context <local-context>` validates the production image contract, then starts a separate production-mode container with the test-only provider, external test Postgres/IdP and generated credentials. Through the real TLS proxy, an HTTP driver verifies OIDC login, pending-login and session survival across process restarts, CSRF and role/tenant separation. It creates a test-purpose key, policy and scoped credential through the API, runs the real `brig` CLI, verifies its signature independently with OpenSSL and checks key disable and credential revocation. The proxy is also checked for body/rate limits and secret-free output. These tests run in the existing full CI gate; they do not replace release-policy, approval, native-tool or restore tests. No real HSM or cluster is contacted. A successful SoftHSM run is not evidence about vendor hardware, firmware, backup or key attestation.
 
 ## Migrate and bootstrap separately
 

@@ -11,7 +11,13 @@ Verification uses independent tools where possible (OpenSSL), so we aren't only 
 - **AT-OPS-03 Backup and restore.** Dump DB, wipe, restore; audit chain verifies; pending requests still pending; HSM key handles still resolve.
 
 - **AT-OPS-04 Owner bootstrap and schema readiness.** Released admin CLI migrates a fresh DB and repeats safely; organisation UUID/name provisioning is atomic/idempotent and conflicting names reject. Restricted runtime cannot use owner tools or change migration history; missing/changed schema checks fail. Automation: `scripts/production_test.py::bootstrap`, `crates/brigalow-store/tests/admin.rs`, embedded-migration parity unit test.
-- **AT-OPS-05 Production reference.** Build the real non-root production image; assert no compiler or test HSM. Missing backend/provider startup fails. A disposable test-provider target runs production mode through the real pinned TLS proxy with read-only filesystems, dropped capabilities, body/rate limits and generated-secret redaction. Reject mutable image tags and unsafe configuration permissions through the production entry point; validate Compose syntax and Helm single-replica/network-policy refusals. Automation: `scripts/production_test.py::qualify` via the full Compose gate, `scripts/test_helm.py`.
+- **AT-OPS-05 Production reference.** Build the real non-root production image; assert no compiler or test HSM. Missing backend/provider startup fails. A disposable test-provider target runs production mode through the real pinned TLS proxy with read-only filesystems, dropped capabilities, body/rate limits and generated-secret redaction. An HTTP driver completes generated-IdP login across a server-process restart, checks established-session persistence across a second restart, CSRF, single-use login, role and tenant boundaries, creates a test-purpose HSM key/policy/scoped credential and runs the real `brig` CLI through TLS. OpenSSL independently verifies the signature and rejects changed content; key disable and token/session revocation prevent further use. Reject mutable image tags and unsafe configuration permissions through the production entry point; validate Compose syntax and Helm single-replica/network-policy refusals. Automation: `scripts/production_test.py::qualify` and `scripts/production_flow.py` via the full Compose gate, `scripts/test_helm.py`.
+
+AT-OPS-05 also verifies the image's native `--healthcheck` command without
+loading configuration, confirms curl is absent, pauses the disposable DB to
+check bounded readiness failure with unaffected liveness, then verifies
+recovery. The server unit test rejects unavailable and redirect responses as
+well as connection failure; only HTTP 200 passes.
 
 ## Audit
 

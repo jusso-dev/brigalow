@@ -36,6 +36,8 @@ def bootstrap(env, root, restricted=False):
         command("org-create", "--org", org, "--name", "Bootstrap acceptance fixture")
         command("org-create", "--org", org, "--name", "conflicting name", success=False)
     print("AT-OPS-04: operator CLI restricted-role refusal" if restricted else "AT-OPS-04: fresh database migration and idempotent organisation bootstrap")
+    if not restricted:
+        return org
 
 
 def qualify(compose, env, root, directory):
@@ -70,7 +72,12 @@ hsm_pin_file = "/run/brigalow/hsm_pin"
 [login_keys]
 active = { id = "production-test", file = "/run/brigalow/login_key" }
 ''')
-    (app/"identity.json").write_text(json.dumps(dict(public_url="https://brigalow.test", ca_file="/run/brigalow/ca.crt", authorities=[dict(org_id=str(uuid.uuid4()),name="test",issuer="https://idp:8443",jwks_url="https://idp:8443/jwks",human=dict(client_id="valid",authorization_url="https://idp:8443/authorize",token_url="https://idp:8443/token",group_roles={"admins":"org_admin"}))])))
+    org = env["BRIGALOW_TEST_IMAGE_ORG"]
+    authorities = [dict(org_id=org, name=name, issuer="https://idp:8443", jwks_url="https://idp:8443/jwks",
+                        human=dict(client_id="valid", authorization_url="https://idp:8443/authorize",
+                                   token_url="https://idp:8443/token", group_roles={"admins":role}))
+                   for name, role in [("test", "org_admin"), ("custodian", "key_custodian")]]
+    (app/"identity.json").write_text(json.dumps(dict(public_url="https://brigalow.test", ca_file="/run/brigalow/ca.crt", authorities=authorities)))
     for path in [*app.iterdir(), *tls.iterdir()]: path.chmod(0o600)
     def call(*args, **kwargs):
         return subprocess.run(docker+list(args), cwd=root, env=env, check=True, **kwargs)
@@ -86,7 +93,8 @@ active = { id = "production-test", file = "/run/brigalow/login_key" }
         info = json.loads(call("image", "inspect", runtime, capture_output=True, text=True).stdout)[0]
         assert info["Config"]["User"] == "10001:10001"
         assert "BRIGALOW_MODE=production" in info["Config"]["Env"]
-        call("run", "--rm", "--network=none", *restricted, runtime, "sh", "-ec", "test ! -e /usr/lib/softhsm/libsofthsm2.so; test ! -e /usr/bin/cargo; brigalow-admin --help >/dev/null")
+        assert info["Config"]["Healthcheck"]["Test"] == ["CMD", "/usr/local/bin/brigalow-server", "--healthcheck"]
+        call("run", "--rm", "--network=none", *restricted, runtime, "sh", "-ec", "test ! -e /usr/lib/softhsm/libsofthsm2.so; test ! -e /usr/bin/cargo; test ! -e /usr/bin/curl; brigalow-admin --help >/dev/null")
         for volume in [config_volume, tls_volume]:
             call("volume", "create", "--opt", "type=tmpfs", "--opt", "device=tmpfs", "--opt", "o=size=4194304", volume, stdout=subprocess.DEVNULL)
         # Keep tmpfs volumes mounted until consumers exit; stopping the last mount erases them.
@@ -113,18 +121,41 @@ active = { id = "production-test", file = "/run/brigalow/login_key" }
         address = call("port", proxy, "8443", capture_output=True, text=True).stdout.strip()
         context = ssl.create_default_context(cafile=str(Path(directory)/"ca.crt"))
         client = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
-        deadline = time.monotonic()+40
-        while True:
-            try:
-                with client.open("https://"+address+"/healthz", timeout=5) as response:
-                    body = json.loads(response.read())
-                    assert body == {"status":"ok","mode":"production","signing_available":True}
-                    assert response.headers["Strict-Transport-Security"] == "max-age=31536000"
-                    assert response.headers["X-Content-Type-Options"] == "nosniff"
-                break
-            except (urllib.error.URLError, ConnectionError):
-                if time.monotonic() > deadline: raise AssertionError("production readiness failed; diagnostics withheld") from None
-                time.sleep(0.2)
+        def wait_healthy():
+            deadline = time.monotonic()+40
+            while True:
+                try:
+                    with client.open("https://"+address+"/healthz", timeout=5) as response:
+                        body = json.loads(response.read())
+                        assert body == {"status":"ok","mode":"production","signing_available":True}
+                        assert response.headers["Strict-Transport-Security"] == "max-age=31536000"
+                        assert response.headers["X-Content-Type-Options"] == "nosniff"
+                    return
+                except (urllib.error.URLError, ConnectionError):
+                    if time.monotonic() > deadline: raise AssertionError("production readiness failed; diagnostics withheld") from None
+                    time.sleep(0.2)
+        wait_healthy()
+        from production_flow import exercise
+        def restart():
+            call("restart", server, stdout=subprocess.DEVNULL)
+            wait_healthy()
+        exercise("https://"+address, org, env, root, directory, context, restart, protected)
+        # The probe must not load configuration or open an HSM session itself.
+        call("exec", "-e", "BRIGALOW_CONFIG=/missing-config", server, "/usr/local/bin/brigalow-server", "--healthcheck")
+        database = call("compose", "-p", project, "-f", "deploy/dev/compose.yml", "ps", "-q", "postgres", capture_output=True, text=True).stdout.strip()
+        assert database, "disposable database container missing"
+        call("pause", database, stdout=subprocess.DEVNULL)
+        try:
+            with client.open("https://"+address+"/livez", timeout=5) as response:
+                assert response.status == 200, "dependency outage must not fail liveness"
+            started = time.monotonic()
+            probe = subprocess.run(docker+["exec", server, "/usr/local/bin/brigalow-server", "--healthcheck"], capture_output=True, timeout=8)
+            assert probe.returncode != 0 and time.monotonic()-started < 7, "readiness probe did not fail within its bound"
+        finally:
+            call("unpause", database, stdout=subprocess.DEVNULL)
+        wait_healthy()
+        call("exec", server, "/usr/local/bin/brigalow-server", "--healthcheck")
+        print("AT-OPS-05: native readiness probe fails boundedly during DB outage; liveness and recovery pass")
         def request(path, data=None):
             req=urllib.request.Request("https://"+address+path,data=data,headers={"Authorization":"Bearer "+protected[2]})
             try:

@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix="brigalow-test-") as directory:
         run(["cargo", "build", "--locked", "-p", "brig"])
         run(["cargo", "build", "--locked", "-p", "brigalow-server", "--bin", "brigalow-admin"])
         from production_test import bootstrap, qualify
-        bootstrap(env, root)
+        env["BRIGALOW_TEST_IMAGE_ORG"] = bootstrap(env, root)
         run(["cargo", "test", "--locked", "-p", "brigalow-store", "--features", "integration"])
         bootstrap(env, root, restricted=True)
         if not args.tools_only:

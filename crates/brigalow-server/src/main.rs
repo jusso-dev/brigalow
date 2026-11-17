@@ -7,6 +7,22 @@ use brigalow_server::{
 use brigalow_store::Store;
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
+async fn readiness_probe(port: u16) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .get(format!("http://127.0.0.1:{port}/healthz"))
+        .send()
+        .await
+        .is_ok_and(|response| response.status() == reqwest::StatusCode::OK)
+}
+
 async fn run() -> Result<(), &'static str> {
     let mut config = Config::load().map_err(|error| {
         tracing::error!(%error, "configuration rejected");
@@ -167,6 +183,20 @@ async fn shutdown() {
 }
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    let mut args = std::env::args_os().skip(1);
+    if let Some(argument) = args.next() {
+        // Container contract: probe only the fixed local HTTP port, without loading
+        // credentials, opening another HSM session or following proxies/redirects.
+        if argument == "--healthcheck" && args.next().is_none() {
+            return if readiness_probe(8080).await {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::FAILURE
+            };
+        }
+        eprintln!("usage: brigalow-server [--healthcheck]");
+        return std::process::ExitCode::FAILURE;
+    }
     // Fixed application-only log targets: RUST_LOG cannot enable credential-bearing dependency logs.
     tracing_subscriber::registry()
         .with(
@@ -182,5 +212,37 @@ async fn main() -> std::process::ExitCode {
             tracing::error!(error, "server stopped");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{http::StatusCode, routing::get, Router};
+
+    #[tokio::test]
+    async fn readiness_requires_ok_and_does_not_follow_redirects() {
+        for (status, expected) in [
+            (StatusCode::OK, true),
+            (StatusCode::SERVICE_UNAVAILABLE, false),
+            (StatusCode::FOUND, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = Router::new()
+                .route(
+                    "/healthz",
+                    get(move || async move { (status, [("location", "/livez")]) }),
+                )
+                .route("/livez", get(|| async { "ok" }));
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            assert_eq!(readiness_probe(port).await, expected);
+            server.abort();
+            let _ = server.await;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(!readiness_probe(port).await);
     }
 }

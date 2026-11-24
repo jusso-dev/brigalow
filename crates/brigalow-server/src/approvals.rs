@@ -377,3 +377,19 @@ pub async fn htmx() -> impl IntoResponse {
         include_str!("../static/vendor/htmx-4.0.1.min.js"),
     )
 }
+pub async fn stylesheet() -> impl IntoResponse {
+    (
+        [("content-type", "text/css; charset=utf-8")],
+        include_str!("../static/brigalow.css"),
+    )
+}
+/// Vendored OFL fonts (see `static/fonts/README.md`); served same-origin for `font-src 'self'`.
+pub async fn font(Path(name): Path<String>) -> Result<Response> {
+    let bytes: &'static [u8] = match name.as_str() {
+        "inter.woff2" => include_bytes!("../static/fonts/inter.woff2"),
+        "space-grotesk.woff2" => include_bytes!("../static/fonts/space-grotesk.woff2"),
+        "jetbrains-mono.woff2" => include_bytes!("../static/fonts/jetbrains-mono.woff2"),
+        _ => return Err(WebError(StatusCode::NOT_FOUND)),
+    };
+    Ok(([("content-type", "font/woff2")], bytes).into_response())
+}
